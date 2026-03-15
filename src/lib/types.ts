@@ -53,6 +53,8 @@ export interface ToolCall {
 
 export type AgentStatus = 'idle' | 'thinking' | 'working' | 'speaking';
 
+export type AgentScope = 'user' | 'project';
+
 export interface AgentTodo {
   id: string;
   text: string;
@@ -60,6 +62,39 @@ export interface AgentTodo {
   result?: string;
   error?: string;
   timestamp: number;
+}
+
+export interface McpServerInline {
+  type: 'stdio' | 'http' | 'sse' | 'ws';
+  command?: string;
+  args?: string[];
+  url?: string;
+}
+
+export interface HookCommand {
+  type: 'command';
+  command: string;
+}
+
+export interface HookMatcher {
+  matcher?: string;
+  hooks: HookCommand[];
+}
+
+export interface SubagentDef {
+  description: string;
+  prompt?: string;
+  tools?: string[];
+  disallowedTools?: string[];
+  model?: string;
+  permissionMode?: string;
+  maxTurns?: number;
+  skills?: string[];
+  memory?: 'user' | 'project' | 'local';
+  background?: boolean;
+  isolation?: 'worktree';
+  mcpServers?: (string | Record<string, McpServerInline>)[];
+  hooks?: Record<string, HookMatcher[]>;
 }
 
 export interface Agent {
@@ -78,6 +113,11 @@ export interface Agent {
   color: string; // accent color for the employee card
   todos: AgentTodo[]; // per-agent task checklist
   isBoss?: boolean; // boss character — cannot be deleted
+  // Claude Code subagent integration
+  subagentFile?: string; // path to the .md file this agent was synced from
+  subagentDef?: SubagentDef; // parsed subagent definition
+  agentScope?: AgentScope; // 'user' (~/.claude/agents/) or 'project' (.claude/agents/)
+  sessionId?: string; // Claude Code session ID for continuity
 }
 
 export interface ApiKeys {

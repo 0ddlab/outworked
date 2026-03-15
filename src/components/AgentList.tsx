@@ -44,7 +44,12 @@ export default function AgentList({ agents, selectedAgentId, onSelect, onAdd }: 
               {agent.name.charAt(0)}
             </div>
             <div className="flex-1 min-w-0">
-              <p className="text-[12px] font-pixel text-white truncate">{agent.name}</p>
+              <p className="text-[12px] font-pixel text-white truncate">
+                {agent.name}
+                {agent.subagentFile && <span className="text-[9px] text-purple-400 ml-1">⚡</span>}
+                {agent.agentScope === 'project' && <span className="text-[8px] text-cyan-400 ml-1" title="Project agent">PRJ</span>}
+                {agent.agentScope === 'user' && agent.subagentFile && <span className="text-[8px] text-amber-400 ml-1" title="User agent">USR</span>}
+              </p>
               <p className="text-[12px] font-pixel truncate" style={{ color: agent.color + 'cc' }}>{agent.role}</p>
             </div>
             {/* Status dot */}

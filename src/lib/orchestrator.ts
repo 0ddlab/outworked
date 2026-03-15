@@ -1,6 +1,8 @@
-import { Agent, AgentSkill, AgentTodo, ApiKeys, Message } from './types';
+import { Agent, AgentSkill, AgentTodo, ApiKeys, Message, SubagentDef } from './types';
 import { sendMessage } from './ai';
 import { listFiles, listAllFiles, readFile, writeFile } from './filesystem';
+import { runClaudeCodeAdvanced, ClaudeCodeAdvancedOptions, ClaudeCodeStreamCallbacks } from './terminal';
+import { getWorkspace } from './filesystem';
 
 export interface NewAgentSpec {
   name: string;
@@ -299,4 +301,73 @@ export async function generateTodoList(
       timestamp: Date.now(),
     }];
   }
+}
+
+// ─── Claude Code Agent Teams orchestration ────────────────────
+
+export interface AgentTeamCallbacks {
+  onTeamEvent?: (event: { agentName?: string; type: string; text?: string }) => void;
+  onAgentStatus?: (agentName: string, status: 'working' | 'done', thought?: string) => void;
+}
+
+/**
+ * Route tasks through Claude Code Agent Teams.
+ * The Boss becomes the team lead, and all subagent-backed employees
+ * become teammates. Claude Code handles the orchestration natively.
+ */
+export async function routeTasksViaClaudeCode(
+  instruction: string,
+  agents: Agent[],
+  callbacks: AgentTeamCallbacks,
+  signal?: AbortSignal,
+): Promise<string> {
+  const workspace = await getWorkspace();
+
+  // Build subagent definitions from all subagent-backed employees
+  const agentDefs: Record<string, SubagentDef> = {};
+  for (const a of agents) {
+    if (a.isBoss) continue;
+    if (a.subagentDef) {
+      agentDefs[a.name] = a.subagentDef;
+    } else {
+      // Create a synthetic subagent def from the regular agent's personality
+      agentDefs[a.name] = {
+        description: a.role,
+        prompt: a.personality,
+      };
+    }
+  }
+
+  const options: ClaudeCodeAdvancedOptions = {
+    prompt: instruction,
+    cwd: workspace,
+    outputFormat: 'stream-json',
+    verbose: true,
+    agents: Object.keys(agentDefs).length > 0 ? agentDefs : undefined,
+    enableAgentTeams: true,
+    teammateMode: 'auto',
+    permissionMode: 'default',
+  };
+
+  let fullText = '';
+
+  const streamCallbacks: ClaudeCodeStreamCallbacks = {
+    onTextDelta: (text) => {
+      fullText += text;
+      callbacks.onTeamEvent?.({ type: 'text', text });
+    },
+    onToolUse: (name, input) => {
+      if (name === 'Agent') {
+        const agentName = (input.agent ?? input.name ?? '') as string;
+        callbacks.onAgentStatus?.(agentName, 'working', `Working on: ${((input.prompt ?? input.task ?? '') as string).slice(0, 80)}`);
+      }
+      callbacks.onTeamEvent?.({ type: 'tool_use', agentName: (input.agent ?? '') as string, text: `${name}: ${JSON.stringify(input).slice(0, 200)}` });
+    },
+    onEvent: (event) => {
+      callbacks.onTeamEvent?.({ type: event.type });
+    },
+  };
+
+  const result = await runClaudeCodeAdvanced(options, streamCallbacks, signal);
+  return result.result || fullText;
 }

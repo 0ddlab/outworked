@@ -1,6 +1,17 @@
 // Bridge to Electron shell APIs exposed via preload
 // Falls back to no-ops when running in a regular browser (npm run dev)
 
+import { SubagentDef } from './types';
+export type { SubagentDef } from './types';
+
+export interface ClaudeCodeAuthStatus {
+  installed: boolean;
+  version: string | null;
+  authenticated: boolean;
+  accountInfo: string | null;
+  error: string | null;
+}
+
 export interface ExecResult {
   ok: boolean;
   stdout: string;
@@ -11,15 +22,104 @@ export interface ExecResult {
 
 interface ClaudeCodeAPI {
   start: (prompt: string, systemPrompt: string, cwd?: string, timeoutMs?: number) => Promise<number>;
+  startAdvanced: (options: ClaudeCodeAdvancedOptions) => Promise<number>;
   abort: (reqId: number) => Promise<boolean>;
   onChunk: (cb: (reqId: number, data: string) => void) => () => void;
   onStderr: (cb: (reqId: number, data: string) => void) => () => void;
   onDone: (cb: (reqId: number, code: number, error: string | null) => void) => () => void;
+  version: () => Promise<string | null>;
+  authStatus: () => Promise<ClaudeCodeAuthStatus>;
+  listAgents: (cwd?: string) => Promise<{ ok: boolean; stdout: string; stderr: string; code?: number; error?: string }>;
+  readAgentFiles: (cwd?: string) => Promise<AgentFileInfo[]>;
+  writeAgentFile: (filePath: string, content: string) => Promise<{ ok: boolean; error?: string }>;
+  deleteAgentFile: (filePath: string) => Promise<{ ok: boolean; error?: string }>;
+  onAgentsChanged: (cb: () => void) => () => void;
+  watchProjectAgents: (projectDir: string | null) => void;
+}
+
+export interface ClaudeCodeAdvancedOptions {
+  prompt?: string;
+  cwd?: string;
+  systemPrompt?: string;
+  appendSystemPrompt?: string;
+  model?: string; // 'sonnet' | 'opus' | 'haiku' | full model ID
+  allowedTools?: string[];
+  disallowedTools?: string[];
+  maxTurns?: number;
+  maxBudget?: number;
+  continueSession?: boolean;
+  resumeSessionId?: string;
+  agents?: Record<string, SubagentDef>;
+  outputFormat?: 'text' | 'json' | 'stream-json';
+  verbose?: boolean;
+  permissionMode?: 'default' | 'acceptEdits' | 'dontAsk' | 'bypassPermissions' | 'plan';
+  dangerouslySkipPermissions?: boolean;
+  tools?: string; // restrict built-in tools e.g. "Bash,Edit,Read"
+  enableAgentTeams?: boolean;
+  teammateMode?: 'auto' | 'in-process' | 'tmux';
+  timeoutMs?: number;
+}
+
+export interface AgentFileInfo {
+  file: string;
+  path: string;
+  content: string;
+  scope: 'user' | 'project';
+}
+
+// Parsed stream-json event from Claude Code
+export interface ClaudeCodeEvent {
+  type: string;
+  subtype?: string;
+  // For stream_event
+  event?: {
+    type?: string;
+    delta?: {
+      type?: string;
+      text?: string;
+    };
+    content_block?: {
+      type?: string;
+      name?: string;
+      id?: string;
+      text?: string;
+    };
+    message?: {
+      id?: string;
+      model?: string;
+      usage?: { input_tokens?: number; output_tokens?: number };
+    };
+  };
+  // For tool_use / tool_result events
+  tool_use?: {
+    name?: string;
+    input?: Record<string, unknown>;
+  };
+  tool_result?: {
+    content?: string;
+    is_error?: boolean;
+  };
+  // For assistant / result messages
+  message?: {
+    role?: string;
+    content?: string | Array<{ type: string; text?: string; name?: string; input?: unknown }>;
+  };
+  // For session metadata
+  session_id?: string;
+  result?: string;
+  is_error?: boolean;
+  duration_ms?: number;
+  total_cost_usd?: number;
+  usage?: {
+    input_tokens?: number;
+    output_tokens?: number;
+  };
 }
 
 interface ElectronAPI {
   isElectron: boolean;
   platform: string;
+  homedir: string;
   shell: {
     spawn: (cwd?: string) => Promise<number>;
     write: (id: number, data: string) => Promise<boolean>;
@@ -35,6 +135,22 @@ interface ElectronAPI {
 function getAPI(): ElectronAPI | null {
   const w = window as unknown as { electronAPI?: ElectronAPI };
   return w.electronAPI?.isElectron ? w.electronAPI : null;
+}
+
+export function getHomedir(): string {
+  const api = getAPI();
+  return api?.homedir || '~';
+}
+
+export function onClaudeAgentsChanged(cb: () => void): () => void {
+  const api = getAPI();
+  if (!api?.claudeCode?.onAgentsChanged) return () => {};
+  return api.claudeCode.onAgentsChanged(cb);
+}
+
+export function watchProjectAgents(projectDir: string | null): void {
+  const api = getAPI();
+  api?.claudeCode?.watchProjectAgents(projectDir);
 }
 
 export function isElectron(): boolean {
@@ -148,4 +264,194 @@ export async function runClaudeCode(
       removeDone();
     }
   });
+}
+
+// ─── Advanced Claude Code CLI execution ───────────────────────────
+// Uses stream-json output format for full event visibility including
+// tool calls, subagent activity, and session metadata.
+
+export interface ClaudeCodeStreamCallbacks {
+  onTextDelta?: (text: string) => void;
+  onToolUse?: (name: string, input: Record<string, unknown>) => void;
+  onToolResult?: (content: string, isError: boolean) => void;
+  onEvent?: (event: ClaudeCodeEvent) => void;
+  onStderr?: (text: string) => void;
+}
+
+export async function runClaudeCodeAdvanced(
+  options: ClaudeCodeAdvancedOptions,
+  callbacks: ClaudeCodeStreamCallbacks,
+  signal?: AbortSignal,
+): Promise<{
+  result: string;
+  sessionId?: string;
+  cost?: number;
+  usage?: { input_tokens: number; output_tokens: number };
+}> {
+  const api = getAPI();
+  if (!api?.claudeCode) {
+    throw new Error('Claude Code requires the Electron app. Make sure `claude` CLI is installed.');
+  }
+
+  const reqId = await api.claudeCode.startAdvanced(options);
+
+  if (signal) {
+    const onAbort = () => api.claudeCode!.abort(reqId);
+    signal.addEventListener('abort', onAbort, { once: true });
+  }
+
+  return new Promise((resolve, reject) => {
+    let fullText = '';
+    let sessionId: string | undefined;
+    let cost: number | undefined;
+    let usage: { input_tokens: number; output_tokens: number } | undefined;
+    let buffer = ''; // For parsing newline-delimited JSON
+
+    const removeChunk = api.claudeCode!.onChunk((id, chunk) => {
+      if (id !== reqId) return;
+
+      if (options.outputFormat === 'stream-json' || !options.outputFormat) {
+        // Parse newline-delimited JSON events
+        buffer += chunk;
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || ''; // Keep incomplete line in buffer
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed) continue;
+          try {
+            const event: ClaudeCodeEvent = JSON.parse(trimmed);
+            callbacks.onEvent?.(event);
+
+            // Extract text deltas
+            if (event.type === 'assistant' && event.message?.content) {
+              const content = event.message.content;
+              if (typeof content === 'string') {
+                fullText += content;
+                callbacks.onTextDelta?.(content);
+              } else if (Array.isArray(content)) {
+                for (const block of content) {
+                  if (block.type === 'text' && block.text) {
+                    fullText += block.text;
+                    callbacks.onTextDelta?.(block.text);
+                  } else if (block.type === 'tool_use' && block.name) {
+                    callbacks.onToolUse?.(block.name, (block.input as Record<string, unknown>) || {});
+                  }
+                }
+              }
+            }
+
+            // Handle result message (final)
+            if (event.type === 'result') {
+              if (event.result) fullText = event.result;
+              sessionId = event.session_id;
+              cost = event.total_cost_usd;
+              if (event.usage) {
+                usage = {
+                  input_tokens: event.usage.input_tokens || 0,
+                  output_tokens: event.usage.output_tokens || 0,
+                };
+              }
+            }
+          } catch {
+            // Not valid JSON — might be plain text mixed in
+            fullText += trimmed;
+            callbacks.onTextDelta?.(trimmed);
+          }
+        }
+      } else {
+        // Plain text mode
+        fullText += chunk;
+        callbacks.onTextDelta?.(chunk);
+      }
+    });
+
+    const removeStderr = api.claudeCode!.onStderr((id, data) => {
+      if (id !== reqId) return;
+      callbacks.onStderr?.(data);
+    });
+
+    const removeDone = api.claudeCode!.onDone((id, code, error) => {
+      if (id !== reqId) return;
+      cleanup();
+
+      // Process any remaining buffer
+      if (buffer.trim()) {
+        try {
+          const event: ClaudeCodeEvent = JSON.parse(buffer.trim());
+          callbacks.onEvent?.(event);
+          if (event.type === 'result' && event.result) {
+            fullText = event.result;
+            sessionId = event.session_id;
+            cost = event.total_cost_usd;
+          }
+        } catch {
+          fullText += buffer;
+        }
+      }
+
+      if (error) {
+        reject(new Error(`Claude Code error: ${error}`));
+      } else if (code !== 0) {
+        reject(new Error(fullText || `Claude Code exited with code ${code}`));
+      } else {
+        resolve({ result: fullText, sessionId, cost, usage });
+      }
+    });
+
+    function cleanup() {
+      removeChunk();
+      removeStderr();
+      removeDone();
+    }
+  });
+}
+
+// ─── Claude Code Utilities ────────────────────────────────────────
+
+export async function getClaudeCodeVersion(): Promise<string | null> {
+  const api = getAPI();
+  if (!api?.claudeCode) return null;
+  return api.claudeCode.version();
+}
+
+export async function getClaudeCodeAuthStatus(): Promise<ClaudeCodeAuthStatus> {
+  const api = getAPI();
+  if (!api?.claudeCode) {
+    return { installed: false, version: null, authenticated: false, accountInfo: null, error: 'Not running in Electron' };
+  }
+  return api.claudeCode.authStatus();
+}
+
+export async function listClaudeAgents(cwd?: string): Promise<string | null> {
+  const api = getAPI();
+  if (!api?.claudeCode) return null;
+  const result = await api.claudeCode.listAgents(cwd);
+  return result.ok ? result.stdout : null;
+}
+
+export async function readClaudeAgentFiles(cwd?: string): Promise<AgentFileInfo[]> {
+  const api = getAPI();
+  if (!api?.claudeCode) return [];
+  return api.claudeCode.readAgentFiles(cwd);
+}
+
+export async function writeClaudeAgentFile(filePath: string, content: string): Promise<boolean> {
+  const api = getAPI();
+  if (!api?.claudeCode) return false;
+  const result = await api.claudeCode.writeAgentFile(filePath, content);
+  return result.ok;
+}
+
+export async function deleteClaudeAgentFile(filePath: string): Promise<boolean> {
+  const api = getAPI();
+  if (!api?.claudeCode) return false;
+  const result = await api.claudeCode.deleteAgentFile(filePath);
+  return result.ok;
+}
+
+export async function abortClaudeCode(reqId: number): Promise<boolean> {
+  const api = getAPI();
+  if (!api?.claudeCode) return false;
+  return api.claudeCode.abort(reqId);
 }

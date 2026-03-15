@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
 import { Agent, AgentSkill, AgentTodo, ApiKeys, Message, MODELS, ToolCall } from '../lib/types';
 import { sendMessage } from '../lib/ai';
-import { executeTask, generateTodoList, routeTasks } from '../lib/orchestrator';
+import { executeTask, generateTodoList, routeTasks, routeTasksViaClaudeCode } from '../lib/orchestrator';
 import { createAgent } from '../lib/storage';
 
 interface ChatWindowProps {
@@ -92,6 +92,63 @@ export default function ChatWindow({ agent, agents, apiKeys, skills, onUpdateAge
 
     // ── Boss orchestrator flow ───────────────────────────────────
     async function handleBossOrchestrate(bossAgent: Agent, userText: string): Promise<string> {
+      const employees = agents.filter(a => !a.isBoss);
+      const hasSubagents = employees.some(a => a.subagentDef);
+
+      // If any employees are Claude Code subagents, use agent teams
+      if (hasSubagents) {
+        return handleBossAgentTeams(bossAgent, userText, employees);
+      }
+
+      // Otherwise use the classic orchestrator
+      return handleBossClassic(bossAgent, userText);
+    }
+
+    // Boss flow using Claude Code Agent Teams
+    async function handleBossAgentTeams(bossAgent: Agent, userText: string, employees: Agent[]): Promise<string> {
+      onUpdateAgent({ ...bossAgent, status: 'thinking', currentThought: '🤖 Claude Code Agent Teams: orchestrating…' });
+      setStreamingText('⚡ **Claude Code Agent Teams** — delegating work to subagent employees…\n\n');
+
+      try {
+        const result = await routeTasksViaClaudeCode(
+          userText,
+          employees,
+          {
+            onTeamEvent: (event) => {
+              if (event.type === 'text' && event.text) {
+                setStreamingText(prev => prev + event.text);
+              }
+            },
+            onAgentStatus: (agentName, status, thought) => {
+              const emp = employees.find(a => a.name.toLowerCase() === agentName.toLowerCase());
+              if (emp) {
+                onUpdateAgent({
+                  ...emp,
+                  status: status === 'working' ? 'working' : 'idle',
+                  currentThought: thought || '',
+                });
+              }
+            },
+          },
+          abortRef.current?.signal,
+        );
+
+        // Reset all employees to idle
+        for (const emp of employees) {
+          onUpdateAgent({ ...emp, status: 'idle', currentThought: '' });
+        }
+
+        return result;
+      } catch (err) {
+        // Fallback to classic orchestration on error
+        const errMsg = err instanceof Error ? err.message : 'Unknown error';
+        setStreamingText(`⚠️ Agent teams error: ${errMsg}\n\nFalling back to classic orchestration…\n\n`);
+        return handleBossClassic(bossAgent, userText);
+      }
+    }
+
+    // Classic Boss orchestrator flow (non-Claude Code)
+    async function handleBossClassic(bossAgent: Agent, userText: string): Promise<string> {
       const routerModel = { model: agent!.model, provider: agent!.provider };
 
       // Step 1: Route through orchestrator
@@ -275,6 +332,16 @@ export default function ChatWindow({ agent, agents, apiKeys, skills, onUpdateAge
               currentThought: `🔧 ${toolLabel}`,
             });
           },
+          // Claude Code stream events for subagent employees
+          onClaudeCodeEvent: agentState.subagentDef ? (event) => {
+            if (event.type === 'tool_use' && event.toolName) {
+              onUpdateAgent({
+                ...agentState,
+                status: 'working',
+                currentThought: `🔧 ${event.toolName}${event.toolInput?.file_path ? ` ${event.toolInput.file_path}` : ''}`,
+              });
+            }
+          } : undefined,
         },
       );
     }
@@ -302,7 +369,9 @@ export default function ChatWindow({ agent, agents, apiKeys, skills, onUpdateAge
           <p className="text-xs font-pixel text-white truncate">{agent.name}</p>
           <p className="text-[11px] font-pixel truncate" style={{ color: agent.color }}>{agent.role}</p>
         </div>
-        <span className="text-[11px] font-pixel text-slate-400 shrink-0">{model?.label ?? agent.model}</span>
+        <span className="text-[11px] font-pixel text-slate-400 shrink-0">
+          {agent.subagentFile ? '⚡ Claude Code' : model?.label ?? agent.model}
+        </span>
       </div>
 
       {/* Status */}

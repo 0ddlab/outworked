@@ -1,7 +1,7 @@
 import { Agent, AgentSkill, ApiKeys, Message, ToolCall } from './types';
 import { AGENT_TOOLS, ToolDefinition, executeTool } from './tools';
 import { getWorkspace } from './filesystem';
-import { runClaudeCode } from './terminal';
+import { runClaudeCode, runClaudeCodeAdvanced, ClaudeCodeAdvancedOptions, ClaudeCodeStreamCallbacks } from './terminal';
 
 function buildToolPreamble(workspace: string): string {
   return `
@@ -48,6 +48,7 @@ export interface SendOptions {
   extraTools?: ToolDefinition[]; // additional tools (e.g. assign_task for boss)
   extraSystemPrompt?: string; // appended to the system prompt
   customToolExecutor?: (name: string, args: Record<string, unknown>) => Promise<string | null>; // return string to override default executeTool, null to use default
+  onClaudeCodeEvent?: (event: { type: string; toolName?: string; toolInput?: Record<string, unknown>; text?: string }) => void;
 }
 
 export async function sendMessage(
@@ -68,7 +69,7 @@ export async function sendMessage(
   ];
 
   if (agent.provider === 'claude-code') {
-    return callClaudeCode(systemPrompt, messages, onThought, signal);
+    return callClaudeCode(systemPrompt, messages, onThought, signal, agent, options?.onClaudeCodeEvent);
   } else if (agent.provider === 'openai') {
     return callOpenAI(agent.model, systemPrompt, messages, keys.openai, onThought, signal, useTools, options?.onToolCall, options?.extraTools, options?.customToolExecutor);
   } else if (agent.provider === 'google') {
@@ -101,15 +102,18 @@ function toolLabel(name: string, args: Record<string, unknown>): string {
 }
 
 // ─── Claude Code CLI ──────────────────────────────────────────────
-// Uses the locally-installed `claude` CLI in print mode.
-// Claude Code handles its own tool execution (bash, file editing, etc.)
-// so the app's tool loop is bypassed — the final text response is returned.
+// Uses the locally-installed `claude` CLI.
+// For subagent-backed agents, uses runClaudeCodeAdvanced with stream-json
+// for full event visibility (tool calls, subagent activity, session metadata).
+// For regular claude-code agents, falls back to the simpler runClaudeCode.
 
 async function callClaudeCode(
   system: string,
   messages: Message[],
   onThought: (text: string) => void,
   signal?: AbortSignal,
+  agent?: Agent,
+  onClaudeCodeEvent?: SendOptions['onClaudeCodeEvent'],
 ): Promise<string> {
   // Build a single prompt from conversation history
   let prompt = '';
@@ -119,8 +123,14 @@ async function callClaudeCode(
   }
 
   const workspace = await getWorkspace();
-  let fullText = '';
 
+  // Use advanced mode for subagent-backed agents (or any who have subagentDef)
+  if (agent?.subagentDef) {
+    return callClaudeCodeAdvanced(prompt, system, workspace, onThought, signal, agent, onClaudeCodeEvent);
+  }
+
+  // Fallback: simple mode for regular claude-code agents
+  let fullText = '';
   onThought('🤖 Claude Code is working…');
 
   const output = await runClaudeCode(
@@ -134,13 +144,90 @@ async function callClaudeCode(
     signal,
   );
 
-  // If streaming didn't accumulate text, use the full output
   if (!fullText) {
     fullText = output;
     onThought(fullText);
   }
 
   return fullText;
+}
+
+/**
+ * Advanced Claude Code invocation with stream-json parsing.
+ * Used for subagent-backed agents for rich tool/event visibility.
+ */
+async function callClaudeCodeAdvanced(
+  prompt: string,
+  system: string,
+  workspace: string,
+  onThought: (text: string) => void,
+  signal?: AbortSignal,
+  agent?: Agent,
+  onClaudeCodeEvent?: SendOptions['onClaudeCodeEvent'],
+): Promise<string> {
+  const subDef = agent?.subagentDef;
+
+  const options: ClaudeCodeAdvancedOptions = {
+    prompt,
+    cwd: workspace,
+    systemPrompt: system,
+    outputFormat: 'stream-json',
+    verbose: true,
+    model: subDef?.model || undefined,
+    allowedTools: subDef?.tools,
+    disallowedTools: subDef?.disallowedTools,
+    maxTurns: subDef?.maxTurns,
+    permissionMode: (subDef?.permissionMode as ClaudeCodeAdvancedOptions['permissionMode']) || 'default',
+    continueSession: !!agent?.sessionId,
+    resumeSessionId: agent?.sessionId,
+  };
+
+  let fullText = '';
+  onThought('🤖 Claude Code is working…');
+
+  const callbacks: ClaudeCodeStreamCallbacks = {
+    onTextDelta: (text) => {
+      fullText += text;
+      onThought(fullText);
+    },
+    onToolUse: (name, input) => {
+      const label = claudeCodeToolLabel(name, input);
+      if (fullText && !fullText.endsWith('\n')) fullText += '\n';
+      fullText += `\n${label}\n`;
+      onThought(fullText);
+      onClaudeCodeEvent?.({ type: 'tool_use', toolName: name, toolInput: input });
+    },
+    onEvent: (event) => {
+      onClaudeCodeEvent?.({ type: event.type, text: typeof event.result === 'string' ? event.result : undefined });
+    },
+  };
+
+  const result = await runClaudeCodeAdvanced(options, callbacks, signal);
+
+  // Store session ID on the agent for continuity
+  if (agent && result.sessionId) {
+    agent.sessionId = result.sessionId;
+  }
+
+  return result.result || fullText;
+}
+
+function claudeCodeToolLabel(name: string, args: Record<string, unknown>): string {
+  const p = (args.file_path ?? args.path ?? args.command ?? '') as string;
+  switch (name) {
+    case 'Write': return `📁 Writing ${p}…`;
+    case 'Edit': return `✏️ Editing ${p}…`;
+    case 'Read': return `📖 Reading ${p}…`;
+    case 'Bash': return `💻 $ ${p.slice(0, 80)}…`;
+    case 'Glob': return `🔍 Searching files…`;
+    case 'Grep': return `🔎 Grepping ${(args.pattern as string) ?? ''}…`;
+    case 'WebFetch': return `🌐 Fetching ${p}…`;
+    case 'WebSearch': return `🔍 Searching: ${(args.query as string) ?? ''}…`;
+    case 'Agent': return `🤖 Delegating to subagent…`;
+    case 'TodoWrite': return `📋 Updating task list…`;
+    case 'TaskCreate': return `📋 Creating task…`;
+    default: return `🔧 ${name} ${p ? `(${p.slice(0, 40)})` : ''}…`;
+  }
 }
 
 // ─── OpenAI Responses API ─────────────────────────────────────────

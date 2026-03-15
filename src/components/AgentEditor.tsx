@@ -1,9 +1,12 @@
 import { useMemo, useState } from 'react';
-import { Agent, ApiKeys, MODELS, SPRITE_KEYS, AGENT_COLORS } from '../lib/types';
+import { Agent, ApiKeys, MODELS, SPRITE_KEYS, AGENT_COLORS, SubagentDef, AgentScope } from '../lib/types';
+import { writeClaudeAgentFile, deleteClaudeAgentFile, getHomedir } from '../lib/terminal';
+import { buildSubagentMd, generateAgentWithAI, parseSubagentFrontmatter } from '../lib/storage';
 
 interface AgentEditorProps {
   agent: Agent;
   apiKeys: ApiKeys;
+  workspaceDir?: string;
   onSave: (agent: Agent) => void;
   onDelete: (agentId: string) => void;
   onClose: () => void;
@@ -16,9 +19,12 @@ const PROVIDER_KEY_MAP: Record<string, keyof ApiKeys | null> = {
   'claude-code': null, // local CLI, no key needed
 };
 
-export default function AgentEditor({ agent, apiKeys, onSave, onDelete, onClose }: AgentEditorProps) {
+export default function AgentEditor({ agent, apiKeys, workspaceDir, onSave, onDelete, onClose }: AgentEditorProps) {
   const [draft, setDraft] = useState<Agent>({ ...agent });
-  const [tab, setTab] = useState<'profile' | 'history'>('profile');
+  const [tab, setTab] = useState<'profile' | 'subagent' | 'history'>('profile');
+  const [saving, setSaving] = useState(false);
+  const [generating, setGenerating] = useState(false);
+  const [generatePrompt, setGeneratePrompt] = useState<string | null>(null);
 
   const availableModels = useMemo(() =>
     MODELS.filter((m) => {
@@ -54,14 +60,14 @@ export default function AgentEditor({ agent, apiKeys, onSave, onDelete, onClose 
 
       {/* Tabs */}
       <div className="flex border-b border-slate-600">
-        {(['profile', 'history'] as const).map((t) => (
+        {(['profile', ...(draft.subagentFile ? ['subagent'] : []), 'history'] as const).map((t) => (
           <button
             key={t}
-            onClick={() => setTab(t)}
+            onClick={() => setTab(t as typeof tab)}
             className={`flex-1 py-2 text-[11px] font-pixel transition-colors ${tab === t ? 'text-white border-b-2' : 'text-slate-400 hover:text-slate-200'}`}
             style={tab === t ? { borderBottomColor: draft.color } : {}}
           >
-            {t}
+            {t === 'subagent' ? '⚡ Agent' : t}
           </button>
         ))}
       </div>
@@ -122,6 +128,76 @@ export default function AgentEditor({ agent, apiKeys, onSave, onDelete, onClose 
           </>
         )}
 
+        {tab === 'subagent' && draft.subagentFile && (
+          <SubagentTab
+            agent={draft}
+            onUpdate={(updated) => setDraft(prev => ({ ...prev, ...updated }))}
+            onSaveToFile={async () => {
+              if (!draft.subagentFile || !draft.subagentDef) return;
+              setSaving(true);
+              try {
+                const slug = draft.subagentFile.split('/').pop()?.replace(/\.md$/, '') || draft.name;
+                const content = buildSubagentMd(slug, draft.subagentDef, draft.personality, draft.name, draft.role);
+
+                // Determine the correct target path based on current scope
+                const scope = draft.agentScope || 'user';
+                let targetPath: string;
+                if (scope === 'project' && workspaceDir) {
+                  targetPath = `${workspaceDir}/.claude/agents/${slug}.md`;
+                } else {
+                  targetPath = `${getHomedir()}/.claude/agents/${slug}.md`;
+                }
+
+                await writeClaudeAgentFile(targetPath, content);
+
+                // If path changed (scope switch), delete the old file and update the reference
+                if (targetPath !== draft.subagentFile) {
+                  await deleteClaudeAgentFile(draft.subagentFile);
+                  setDraft(prev => ({ ...prev, subagentFile: targetPath }));
+                }
+              } finally {
+                setSaving(false);
+              }
+            }}
+            onGenerate={async (description: string) => {
+              setGenerating(true);
+              setGeneratePrompt(null);
+              try {
+                const result = await generateAgentWithAI(description, {
+                  name: draft.name !== 'New Employee' ? draft.name : undefined,
+                  scope: draft.agentScope || 'user',
+                  workspaceDir: workspaceDir || undefined,
+                });
+                if (result) {
+                  const parsed = parseSubagentFrontmatter(result.content);
+                  const name = parsed.def['outworked-name'] || parsed.def.name || draft.name;
+                  const role = parsed.def['outworked-role'] || parsed.def.description || draft.role;
+                  // Delete old file if the path changed
+                  if (draft.subagentFile && result.filePath !== draft.subagentFile) {
+                    await deleteClaudeAgentFile(draft.subagentFile);
+                  }
+                  setDraft(prev => ({
+                    ...prev,
+                    name,
+                    role,
+                    personality: parsed.body || prev.personality,
+                    subagentFile: result.filePath,
+                    subagentDef: { description: role, ...parsed.def } as SubagentDef,
+                  }));
+                }
+              } finally {
+                setGenerating(false);
+              }
+            }}
+            onRequestGenerate={() => setGeneratePrompt(draft.role || draft.subagentDef?.description || '')}
+            generatePrompt={generatePrompt}
+            onCancelGenerate={() => setGeneratePrompt(null)}
+            onUpdateGeneratePrompt={setGeneratePrompt}
+            saving={saving}
+            generating={generating}
+          />
+        )}
+
         {tab === 'history' && (
           <div className="space-y-2">
             <div className="flex justify-between items-center">
@@ -173,4 +249,309 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
       {children}
     </div>
   );
+}
+
+// ─── Subagent editor tab ─────────────────────────────────────
+
+function SubagentTab({
+  agent,
+  onUpdate,
+  onSaveToFile,
+  onGenerate,
+  onRequestGenerate,
+  generatePrompt,
+  onCancelGenerate,
+  onUpdateGeneratePrompt,
+  saving,
+  generating,
+}: {
+  agent: Agent;
+  onUpdate: (partial: Partial<Agent>) => void;
+  onSaveToFile: () => void;
+  onGenerate: (description: string) => void;
+  onRequestGenerate: () => void;
+  generatePrompt: string | null;
+  onCancelGenerate: () => void;
+  onUpdateGeneratePrompt: (value: string) => void;
+  saving: boolean;
+  generating: boolean;
+}) {
+  const def = agent.subagentDef || { description: '' };
+  const [toolsText, setToolsText] = useState((def.tools || []).join(', '));
+  const [disallowedToolsText, setDisallowedToolsText] = useState((def.disallowedTools || []).join(', '));
+  const [skillsText, setSkillsText] = useState((def.skills || []).join(', '));
+  const [mcpText, setMcpText] = useState(() => serializeMcpServers(def.mcpServers));
+  const [hooksText, setHooksText] = useState(() => serializeHooks(def.hooks));
+
+  function updateDef(partial: Partial<SubagentDef>) {
+    onUpdate({ subagentDef: { ...def, ...partial } });
+  }
+
+  return (
+    <div className="space-y-3">
+      <div className="bg-purple-900/30 border border-purple-700/50 rounded p-2">
+        <p className="text-[10px] font-pixel text-purple-300">
+          ⚡ Claude Code Subagent
+        </p>
+        <div className="flex items-center gap-2 mt-1">
+          <span
+            className={`text-[9px] font-pixel px-1.5 py-0.5 rounded ${
+              agent.agentScope === 'project'
+                ? 'bg-cyan-900/50 text-cyan-300 border border-cyan-700/50'
+                : 'bg-amber-900/50 text-amber-300 border border-amber-700/50'
+            }`}
+          >
+            {agent.agentScope === 'project' ? 'PROJECT' : 'USER'}
+          </span>
+          <p className="text-[10px] font-mono text-purple-400/70 truncate flex-1">
+            {agent.subagentFile}
+          </p>
+        </div>
+      </div>
+
+      <Field label="Scope">
+        <select
+          value={agent.agentScope || 'user'}
+          onChange={(e) => onUpdate({ agentScope: e.target.value as AgentScope })}
+          className="input-mono"
+        >
+          <option value="user">User (~/.claude/agents/)</option>
+          <option value="project">Project (.claude/agents/)</option>
+        </select>
+      </Field>
+
+      <Field label="Description">
+        <input
+          value={def.description}
+          onChange={(e) => updateDef({ description: e.target.value })}
+          className="input-mono"
+        />
+      </Field>
+
+      <Field label="Allowed Tools (comma-separated)">
+        <input
+          value={toolsText}
+          onChange={(e) => {
+            setToolsText(e.target.value);
+            const tools = e.target.value.split(',').map(t => t.trim()).filter(Boolean);
+            updateDef({ tools: tools.length > 0 ? tools : undefined });
+          }}
+          placeholder="Read, Write, Bash, Glob, Grep, Agent(worker)…"
+          className="input-mono"
+        />
+      </Field>
+
+      <Field label="Disallowed Tools (comma-separated)">
+        <input
+          value={disallowedToolsText}
+          onChange={(e) => {
+            setDisallowedToolsText(e.target.value);
+            const tools = e.target.value.split(',').map(t => t.trim()).filter(Boolean);
+            updateDef({ disallowedTools: tools.length > 0 ? tools : undefined });
+          }}
+          placeholder="Write, Edit…"
+          className="input-mono"
+        />
+      </Field>
+
+      <Field label="Model Override">
+        <select
+          value={def.model || 'inherit'}
+          onChange={(e) => updateDef({ model: e.target.value === 'inherit' ? undefined : e.target.value })}
+          className="input-mono"
+        >
+          <option value="inherit">inherit (parent model)</option>
+          <option value="sonnet">sonnet</option>
+          <option value="opus">opus</option>
+          <option value="haiku">haiku</option>
+          <option value="claude-sonnet-4-6">claude-sonnet-4-6</option>
+          <option value="claude-opus-4-6">claude-opus-4-6</option>
+        </select>
+      </Field>
+
+      <Field label="Max Turns">
+        <input
+          type="number"
+          value={def.maxTurns ?? ''}
+          onChange={(e) => updateDef({ maxTurns: e.target.value ? parseInt(e.target.value) : undefined })}
+          placeholder="default"
+          className="input-mono"
+          min={1}
+        />
+      </Field>
+
+      <Field label="Permission Mode">
+        <select
+          value={def.permissionMode || 'default'}
+          onChange={(e) => updateDef({ permissionMode: e.target.value === 'default' ? undefined : e.target.value })}
+          className="input-mono"
+        >
+          <option value="default">default</option>
+          <option value="acceptEdits">acceptEdits</option>
+          <option value="dontAsk">dontAsk</option>
+          <option value="bypassPermissions">bypassPermissions</option>
+          <option value="plan">plan (read-only)</option>
+        </select>
+      </Field>
+
+      <Field label="Memory">
+        <select
+          value={def.memory || 'none'}
+          onChange={(e) => updateDef({ memory: e.target.value === 'none' ? undefined : e.target.value as SubagentDef['memory'] })}
+          className="input-mono"
+        >
+          <option value="none">none</option>
+          <option value="user">user (cross-project)</option>
+          <option value="project">project (shared via VCS)</option>
+          <option value="local">local (project, not in VCS)</option>
+        </select>
+      </Field>
+
+      <Field label="Skills (comma-separated)">
+        <input
+          value={skillsText}
+          onChange={(e) => {
+            setSkillsText(e.target.value);
+            const skills = e.target.value.split(',').map(s => s.trim()).filter(Boolean);
+            updateDef({ skills: skills.length > 0 ? skills : undefined });
+          }}
+          placeholder="api-conventions, error-handling…"
+          className="input-mono"
+        />
+      </Field>
+
+      <Field label="Isolation">
+        <select
+          value={def.isolation || 'none'}
+          onChange={(e) => updateDef({ isolation: e.target.value === 'none' ? undefined : e.target.value as 'worktree' })}
+          className="input-mono"
+        >
+          <option value="none">none</option>
+          <option value="worktree">worktree (git worktree)</option>
+        </select>
+      </Field>
+
+      <Field label="">
+        <label className="flex items-center gap-2 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={def.background || false}
+            onChange={(e) => updateDef({ background: e.target.checked || undefined })}
+            className="accent-purple-500"
+          />
+          <span className="text-[11px] font-pixel text-slate-300">Run as background task</span>
+        </label>
+      </Field>
+
+      <Field label="MCP Servers (one per line: name or name:command)">
+        <textarea
+          value={mcpText}
+          onChange={(e) => {
+            setMcpText(e.target.value);
+            updateDef({ mcpServers: parseMcpServersText(e.target.value) });
+          }}
+          rows={3}
+          placeholder={"github\nplaywright: npx -y @playwright/mcp@latest"}
+          className="input-mono resize-none text-[10px]"
+        />
+      </Field>
+
+      <Field label="Hooks (JSON)">
+        <textarea
+          value={hooksText}
+          onChange={(e) => {
+            setHooksText(e.target.value);
+            try {
+              const parsed = JSON.parse(e.target.value || '{}');
+              if (typeof parsed === 'object' && !Array.isArray(parsed)) {
+                updateDef({ hooks: Object.keys(parsed).length > 0 ? parsed : undefined });
+              }
+            } catch { /* invalid JSON, don't update */ }
+          }}
+          rows={4}
+          placeholder={'{\n  "PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "./validate.sh"}]}]\n}'}
+          className="input-mono resize-none text-[10px]"
+        />
+      </Field>
+
+      {generatePrompt !== null && (
+        <div className="bg-emerald-900/30 border border-emerald-700/50 rounded p-2 space-y-2">
+          <label className="text-[10px] font-pixel text-emerald-300 block">Describe what this agent should do:</label>
+          <input
+            autoFocus
+            value={generatePrompt}
+            onChange={e => onUpdateGeneratePrompt(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter' && generatePrompt.trim()) onGenerate(generatePrompt.trim()); if (e.key === 'Escape') onCancelGenerate(); }}
+            placeholder='e.g. "frontend React developer"'
+            className="w-full input-mono text-[10px]"
+          />
+          <div className="flex gap-2">
+            <button onClick={onCancelGenerate} className="flex-1 btn-pixel bg-slate-700 hover:bg-slate-600 text-[10px]">Cancel</button>
+            <button onClick={() => generatePrompt.trim() && onGenerate(generatePrompt.trim())} className="flex-1 btn-pixel bg-emerald-700 hover:bg-emerald-600 text-[10px]">Generate</button>
+          </div>
+        </div>
+      )}
+
+      <div className="flex gap-2">
+        <button
+          onClick={onSaveToFile}
+          disabled={saving || generating}
+          className="flex-1 btn-pixel bg-purple-700 hover:bg-purple-600 text-[10px] disabled:opacity-50"
+        >
+          {saving ? 'Saving…' : 'Save to .md File'}
+        </button>
+        <button
+          onClick={onRequestGenerate}
+          disabled={saving || generating || generatePrompt !== null}
+          className="flex-1 btn-pixel bg-emerald-700 hover:bg-emerald-600 text-[10px] disabled:opacity-50"
+        >
+          {generating ? 'Generating…' : '✨ AI Generate'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/** Serialize mcpServers to a simple text format for editing */
+function serializeMcpServers(servers?: SubagentDef['mcpServers']): string {
+  if (!servers || servers.length === 0) return '';
+  return servers.map(entry => {
+    if (typeof entry === 'string') return entry;
+    return Object.entries(entry).map(([name, cfg]) => {
+      if (cfg.command) {
+        const args = cfg.args ? ' ' + cfg.args.join(' ') : '';
+        return `${name}: ${cfg.command}${args}`;
+      }
+      if (cfg.url) return `${name}: ${cfg.url}`;
+      return name;
+    }).join('\n');
+  }).join('\n');
+}
+
+/** Parse the simple text format back to mcpServers */
+function parseMcpServersText(text: string): SubagentDef['mcpServers'] | undefined {
+  const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+  if (lines.length === 0) return undefined;
+  return lines.map(line => {
+    const colonIdx = line.indexOf(':');
+    if (colonIdx === -1) return line; // string reference
+    const name = line.slice(0, colonIdx).trim();
+    const rest = line.slice(colonIdx + 1).trim();
+    if (!rest) return name;
+    // Check if it's a URL
+    if (rest.startsWith('http://') || rest.startsWith('https://')) {
+      return { [name]: { type: 'http' as const, url: rest } };
+    }
+    // Otherwise treat as command + args
+    const parts = rest.split(/\s+/);
+    const cmd = parts[0];
+    const args = parts.length > 1 ? parts.slice(1) : undefined;
+    return { [name]: { type: 'stdio' as const, command: cmd, args } };
+  });
+}
+
+/** Serialize hooks to JSON for editing */
+function serializeHooks(hooks?: SubagentDef['hooks']): string {
+  if (!hooks || Object.keys(hooks).length === 0) return '';
+  return JSON.stringify(hooks, null, 2);
 }

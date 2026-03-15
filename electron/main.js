@@ -36,6 +36,23 @@ function getShellCmd() {
 
 const SHELL_CMD = getShellCmd();
 
+// Augment PATH with common locations where `claude` may be installed.
+// Electron launched from Finder/Dock inherits a minimal PATH that
+// often doesn't include ~/.local/bin or ~/.claude/bin even when the
+// user's .zshrc adds them.
+function augmentedEnv(extra) {
+  const home = process.env.HOME || "";
+  const extraPaths = [
+    path.join(home, ".local", "bin"),
+    path.join(home, ".claude", "bin"),
+    path.join(home, "bin"),
+    "/usr/local/bin",
+  ].filter(Boolean);
+  const currentPath = process.env.PATH || "";
+  const newPath = [...extraPaths, currentPath].join(path.delimiter);
+  return { ...process.env, PATH: newPath, ...(extra || {}) };
+}
+
 // GitHub token injected by renderer after loading API keys
 let githubToken = "";
 
@@ -53,11 +70,11 @@ function setupShellIPC() {
     const proc = isWin
       ? spawn("cmd.exe", [], {
           cwd: cwd || process.env.HOME,
-          env: { ...process.env, TERM: "xterm-256color" },
+          env: augmentedEnv({ TERM: "xterm-256color" }),
         })
       : spawn(SHELL_CMD, ["-l"], {
           cwd: cwd || process.env.HOME,
-          env: { ...process.env, TERM: "xterm-256color" },
+          env: augmentedEnv({ TERM: "xterm-256color" }),
         });
     shells.set(id, { proc, cwd: cwd || process.env.HOME });
 
@@ -145,25 +162,23 @@ function setupShellIPC() {
       const proc = isWin
         ? spawn(command, {
             cwd: execCwd,
-            env: {
-              ...process.env,
+            env: augmentedEnv({
               TERM: "dumb",
               ...(githubToken
                 ? { GH_TOKEN: githubToken, GITHUB_TOKEN: githubToken }
                 : {}),
-            },
+            }),
             timeout: timeoutMs || 30000,
             shell: true,
           })
         : spawn(SHELL_CMD, ["-l", "-c", command], {
             cwd: execCwd,
-            env: {
-              ...process.env,
+            env: augmentedEnv({
               TERM: "dumb",
               ...(githubToken
                 ? { GH_TOKEN: githubToken, GITHUB_TOKEN: githubToken }
                 : {}),
-            },
+            }),
             timeout: timeoutMs || 30000,
           });
 
@@ -226,20 +241,18 @@ function setupShellIPC() {
       const proc = isWin
         ? spawn("cmd.exe", ["/c", cmd], {
             cwd: execCwd,
-            env: {
-              ...process.env,
+            env: augmentedEnv({
               TERM: "dumb",
               OUTWORKED_SYS: systemPrompt || "",
-            },
+            }),
             timeout: timeoutMs || 300000,
           })
         : spawn(SHELL_CMD, ["-l", "-c", cmd], {
             cwd: execCwd,
-            env: {
-              ...process.env,
+            env: augmentedEnv({
               TERM: "dumb",
               OUTWORKED_SYS: systemPrompt || "",
-            },
+            }),
             timeout: timeoutMs || 300000,
           });
 
@@ -305,6 +318,530 @@ function setupShellIPC() {
       return true;
     }
     return false;
+  });
+
+  // ─── Advanced Claude Code integration ──────────────────────────
+  // Rich mode with stream-json output, subagent support, session
+  // management, tool visibility, and agent teams.
+
+  // Start an advanced Claude Code session with stream-json output
+  // Options: { prompt, cwd, systemPrompt, appendSystemPrompt, model,
+  //   allowedTools, disallowedTools, maxTurns, maxBudget, continueSession,
+  //   resumeSessionId, agents (JSON subagent defs), outputFormat, verbose,
+  //   permissionMode, dangerouslySkipPermissions }
+  ipcMain.handle("claude-code:startAdvanced", (_event, options) => {
+    const reqId = ++claudeReqId;
+    const execCwd = options.cwd || process.env.HOME;
+    try {
+      fs.mkdirSync(execCwd, { recursive: true });
+    } catch {
+      /* best-effort */
+    }
+
+    // Build the command line from options
+    const args = ["-p"];
+
+    // Output format: stream-json for full event visibility
+    const outputFormat = options.outputFormat || "stream-json";
+    args.push("--output-format", outputFormat);
+
+    if (options.verbose !== false) {
+      args.push("--verbose");
+    }
+
+    if (outputFormat === "stream-json") {
+      args.push("--include-partial-messages");
+    }
+
+    // Model selection
+    if (options.model) {
+      args.push("--model", options.model);
+    }
+
+    // System prompt
+    if (options.systemPrompt) {
+      args.push("--system-prompt", options.systemPrompt);
+    }
+    if (options.appendSystemPrompt) {
+      args.push("--append-system-prompt", options.appendSystemPrompt);
+    }
+
+    // Tool permissions
+    if (options.allowedTools && options.allowedTools.length > 0) {
+      for (const tool of options.allowedTools) {
+        args.push("--allowedTools", tool);
+      }
+    }
+    if (options.disallowedTools && options.disallowedTools.length > 0) {
+      for (const tool of options.disallowedTools) {
+        args.push("--disallowedTools", tool);
+      }
+    }
+
+    // Limits
+    if (options.maxTurns) {
+      args.push("--max-turns", String(options.maxTurns));
+    }
+    if (options.maxBudget) {
+      args.push("--max-budget-usd", String(options.maxBudget));
+    }
+
+    // Session management
+    if (options.continueSession) {
+      args.push("--continue");
+    }
+    if (options.resumeSessionId) {
+      args.push("--resume", options.resumeSessionId);
+    }
+
+    // Subagent definitions (JSON)
+    if (options.agents) {
+      args.push("--agents", JSON.stringify(options.agents));
+    }
+
+    // Permission mode
+    if (options.permissionMode) {
+      args.push("--permission-mode", options.permissionMode);
+    }
+    if (options.dangerouslySkipPermissions) {
+      args.push("--dangerously-skip-permissions");
+    }
+
+    // Tools restriction
+    if (options.tools) {
+      args.push("--tools", options.tools);
+    }
+
+    // Agent teams
+    if (options.enableAgentTeams) {
+      // Not a CLI flag — set via env var
+    }
+    if (options.teammateMode) {
+      args.push("--teammate-mode", options.teammateMode);
+    }
+
+    const isWin = process.platform === "win32";
+    const envVars = augmentedEnv({
+      TERM: "dumb",
+      ...(githubToken
+        ? { GH_TOKEN: githubToken, GITHUB_TOKEN: githubToken }
+        : {}),
+      ...(options.enableAgentTeams
+        ? { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }
+        : {}),
+    });
+
+    // Spawn claude directly with args array
+    const claudeCmd = "claude";
+    const fullArgs = args;
+
+    // We need to find the claude binary via the shell's PATH
+    const shellCmd = isWin
+      ? `claude ${fullArgs.map((a) => `"${a.replace(/"/g, '\\"')}"`).join(" ")}`
+      : `claude ${fullArgs
+          .map((a) => {
+            // Shell-escape each argument
+            if (/^[a-zA-Z0-9_\-.,/=:]+$/.test(a)) return a;
+            return `'${a.replace(/'/g, "'\\''")}'`;
+          })
+          .join(" ")}`;
+
+    const proc = isWin
+      ? spawn("cmd.exe", ["/c", shellCmd], {
+          cwd: execCwd,
+          env: envVars,
+          timeout: options.timeoutMs || 600000,
+        })
+      : spawn(SHELL_CMD, ["-l", "-c", shellCmd], {
+          cwd: execCwd,
+          env: envVars,
+          timeout: options.timeoutMs || 600000,
+        });
+
+    claudeProcs.set(reqId, proc);
+
+    // Pipe prompt through stdin
+    if (options.prompt) {
+      proc.stdin.write(options.prompt);
+    }
+    proc.stdin.end();
+
+    proc.stdout.on("data", (data) => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send(
+          "claude-code:chunk",
+          reqId,
+          data.toString(),
+        );
+      }
+    });
+
+    proc.stderr.on("data", (data) => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send(
+          "claude-code:stderr",
+          reqId,
+          data.toString(),
+        );
+      }
+    });
+
+    proc.on("error", (err) => {
+      claudeProcs.delete(reqId);
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send("claude-code:done", reqId, -1, err.message);
+      }
+    });
+
+    proc.on("close", (code) => {
+      claudeProcs.delete(reqId);
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send(
+          "claude-code:done",
+          reqId,
+          code ?? -1,
+          null,
+        );
+      }
+    });
+
+    return reqId;
+  });
+
+  // List available subagents from the claude CLI
+  ipcMain.handle("claude-code:listAgents", (_event, cwd) => {
+    return new Promise((resolve) => {
+      const execCwd = cwd || process.env.HOME;
+      const isWin = process.platform === "win32";
+      const cmd = "claude agents";
+      const proc = isWin
+        ? spawn("cmd.exe", ["/c", cmd], {
+            cwd: execCwd,
+            env: augmentedEnv({ TERM: "dumb" }),
+            timeout: 15000,
+          })
+        : spawn(SHELL_CMD, ["-l", "-c", cmd], {
+            cwd: execCwd,
+            env: augmentedEnv({ TERM: "dumb" }),
+            timeout: 15000,
+          });
+      let stdout = "";
+      let stderr = "";
+      proc.stdout.on("data", (d) => {
+        stdout += d.toString();
+      });
+      proc.stderr.on("data", (d) => {
+        stderr += d.toString();
+      });
+      proc.on("error", (err) =>
+        resolve({ ok: false, error: err.message, stdout: "", stderr: "" }),
+      );
+      proc.on("close", (code) =>
+        resolve({ ok: code === 0, stdout, stderr, code }),
+      );
+    });
+  });
+
+  // Check if claude CLI is installed and get version
+  ipcMain.handle("claude-code:version", (_event) => {
+    return new Promise((resolve) => {
+      const isWin = process.platform === "win32";
+      const cmd = "claude --version";
+      const proc = isWin
+        ? spawn("cmd.exe", ["/c", cmd], {
+            env: augmentedEnv({ TERM: "dumb" }),
+            timeout: 10000,
+          })
+        : spawn(SHELL_CMD, ["-l", "-c", cmd], {
+            env: augmentedEnv({ TERM: "dumb" }),
+            timeout: 10000,
+          });
+      let stdout = "";
+      proc.stdout.on("data", (d) => {
+        stdout += d.toString();
+      });
+      proc.on("error", () => resolve(null));
+      proc.on("close", (code) => resolve(code === 0 ? stdout.trim() : null));
+    });
+  });
+
+  // Check Claude Code auth / login status
+  // Returns { installed, version, authenticated, accountInfo, error }
+  ipcMain.handle("claude-code:authStatus", (_event) => {
+    return new Promise((resolve) => {
+      const result = {
+        installed: false,
+        version: null,
+        authenticated: false,
+        accountInfo: null,
+        error: null,
+      };
+      const isWin = process.platform === "win32";
+      const home = process.env.HOME || process.env.USERPROFILE || "";
+
+      // Step 1: check version via CLI
+      const vCmd = "claude --version";
+      const vProc = isWin
+        ? spawn("cmd.exe", ["/c", vCmd], {
+            env: augmentedEnv({ TERM: "dumb" }),
+            timeout: 10000,
+          })
+        : spawn(SHELL_CMD, ["-l", "-c", vCmd], {
+            env: augmentedEnv({ TERM: "dumb" }),
+            timeout: 10000,
+          });
+      let vOut = "",
+        vErr = "";
+      vProc.stdout.on("data", (d) => {
+        vOut += d.toString();
+      });
+      vProc.stderr.on("data", (d) => {
+        vErr += d.toString();
+      });
+      vProc.on("error", () => resolve(result));
+      vProc.on("close", (code) => {
+        if (code !== 0) {
+          // Not installed or not in PATH
+          result.error = vErr.trim().split("\n")[0] || "claude CLI not found";
+          resolve(result);
+          return;
+        }
+        result.installed = true;
+        result.version = vOut.trim();
+
+        // Step 2: check auth by looking for credential/config files
+        // Claude Code stores auth in ~/.claude/ directory
+        const claudeDir = path.join(home, ".claude");
+        const credentialFiles = [
+          path.join(claudeDir, ".credentials.json"),
+          path.join(claudeDir, "credentials.json"),
+          path.join(claudeDir, "config.json"),
+          path.join(claudeDir, "settings.json"),
+        ];
+
+        // Check if .claude directory exists at all
+        if (!fs.existsSync(claudeDir)) {
+          result.error = "Not logged in. Run `claude login` in your terminal.";
+          resolve(result);
+          return;
+        }
+
+        // Check for any credential/config files
+        let hasCredentials = false;
+        for (const credFile of credentialFiles) {
+          try {
+            if (fs.existsSync(credFile)) {
+              const content = fs.readFileSync(credFile, "utf-8");
+              if (content.trim().length > 2) {
+                // not empty {}
+                hasCredentials = true;
+                // Try to extract account info
+                try {
+                  const parsed = JSON.parse(content);
+                  if (parsed.claudeAiOauth)
+                    result.accountInfo = "OAuth (claude.ai)";
+                  else if (parsed.apiKey || parsed.api_key)
+                    result.accountInfo = "API key";
+                  else if (parsed.primary_account?.email)
+                    result.accountInfo = parsed.primary_account.email;
+                } catch {
+                  /* not JSON */
+                }
+                break;
+              }
+            }
+          } catch {
+            /* skip unreadable files */
+          }
+        }
+
+        // Also check for any files in .claude that suggest auth happened
+        if (!hasCredentials) {
+          try {
+            const dirContents = fs.readdirSync(claudeDir);
+            // If there are files beyond just settings, likely authenticated
+            const authIndicators = dirContents.filter(
+              (f) =>
+                f.includes("credential") ||
+                f.includes("oauth") ||
+                f.includes("auth") ||
+                f.includes("session") ||
+                f.includes("token") ||
+                f === "statsig" ||
+                f === "statsig_lcut",
+            );
+            hasCredentials = authIndicators.length > 0;
+            if (hasCredentials && !result.accountInfo) {
+              result.accountInfo = "session active";
+            }
+          } catch {
+            /* skip */
+          }
+        }
+
+        if (hasCredentials) {
+          result.authenticated = true;
+        } else {
+          result.error = "Not logged in. Run `claude login` in your terminal.";
+        }
+        resolve(result);
+      });
+    });
+  });
+
+  // Read subagent .md files from ~/.claude/agents/ and <cwd>/.claude/agents/
+  ipcMain.handle("claude-code:readAgentFiles", (_event, cwd) => {
+    const home = process.env.HOME || "";
+    const userDir = path.join(home, ".claude", "agents");
+    const results = [];
+    const dirs = [{ dir: userDir, scope: "user" }];
+    if (cwd) {
+      const projectDir = path.join(cwd, ".claude", "agents");
+      // Avoid duplicate if cwd is home
+      if (path.resolve(projectDir) !== path.resolve(userDir)) {
+        dirs.push({ dir: projectDir, scope: "project" });
+      }
+    }
+    for (const { dir, scope } of dirs) {
+      try {
+        if (!fs.existsSync(dir)) continue;
+        const files = fs.readdirSync(dir).filter((f) => f.endsWith(".md"));
+        for (const file of files) {
+          const content = fs.readFileSync(path.join(dir, file), "utf-8");
+          results.push({
+            file,
+            path: path.join(dir, file),
+            content,
+            scope,
+          });
+        }
+      } catch {
+        /* skip unreadable dirs */
+      }
+    }
+    return results;
+  });
+
+  // Write a subagent .md file
+  ipcMain.handle("claude-code:writeAgentFile", (_event, filePath, content) => {
+    try {
+      // Validate: only allow writing to .claude/agents/ directories
+      const normalized = path.normalize(filePath);
+      if (!normalized.includes(path.join(".claude", "agents"))) {
+        return {
+          ok: false,
+          error: "Can only write to .claude/agents/ directories",
+        };
+      }
+      fs.mkdirSync(path.dirname(normalized), { recursive: true });
+      fs.writeFileSync(normalized, content, "utf-8");
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+
+  // Delete a subagent file
+  ipcMain.handle("claude-code:deleteAgentFile", (_event, filePath) => {
+    try {
+      const normalized = path.normalize(filePath);
+      if (!normalized.includes(path.join(".claude", "agents"))) {
+        return {
+          ok: false,
+          error: "Can only delete from .claude/agents/ directories",
+        };
+      }
+      if (fs.existsSync(normalized)) {
+        fs.unlinkSync(normalized);
+      }
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+
+  // ─── Auto-watch agent directories ───────────────────────────────
+  // Watch ~/.claude/agents/ for changes and notify the renderer.
+  const agentWatchers = [];
+  const userAgentDir = path.join(process.env.HOME || "", ".claude", "agents");
+
+  function notifyAgentsChanged() {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send("claude-code:agents-changed");
+    }
+  }
+
+  // Debounce to avoid rapid-fire events from editors saving files
+  let watchTimer = null;
+  function debouncedNotify() {
+    if (watchTimer) clearTimeout(watchTimer);
+    watchTimer = setTimeout(notifyAgentsChanged, 500);
+  }
+
+  function watchAgentDir(dir) {
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+      const watcher = fs.watch(
+        dir,
+        { persistent: false },
+        (eventType, filename) => {
+          if (filename && filename.endsWith(".md")) {
+            debouncedNotify();
+          }
+        },
+      );
+      agentWatchers.push(watcher);
+    } catch {
+      /* directory may not exist yet — that's ok */
+    }
+  }
+
+  // Always watch user-level agents
+  watchAgentDir(userAgentDir);
+
+  // Watch project-level agents when workspace dir changes
+  let projectAgentWatcher = null;
+  ipcMain.on("claude-code:watchProjectAgents", (_event, projectDir) => {
+    // Close previous project watcher
+    if (projectAgentWatcher) {
+      try {
+        projectAgentWatcher.close();
+      } catch {
+        /* ignore */
+      }
+      const idx = agentWatchers.indexOf(projectAgentWatcher);
+      if (idx !== -1) agentWatchers.splice(idx, 1);
+      projectAgentWatcher = null;
+    }
+    if (!projectDir) return;
+    const dir = path.join(projectDir, ".claude", "agents");
+    if (path.resolve(dir) === path.resolve(userAgentDir)) return;
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+      projectAgentWatcher = fs.watch(
+        dir,
+        { persistent: false },
+        (eventType, filename) => {
+          if (filename && filename.endsWith(".md")) {
+            debouncedNotify();
+          }
+        },
+      );
+      agentWatchers.push(projectAgentWatcher);
+    } catch {
+      /* directory may not exist yet — that's ok */
+    }
+  });
+
+  // Clean up watchers on quit
+  app.on("before-quit", () => {
+    for (const w of agentWatchers) {
+      try {
+        w.close();
+      } catch {
+        /* ignore */
+      }
+    }
   });
 }
 

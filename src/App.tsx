@@ -1,6 +1,8 @@
 import { useEffect, useState, useCallback, lazy, Suspense } from 'react';
-import { Agent, AgentSkill, ApiKeys } from './lib/types';
-import { loadAgents, saveAgents, loadApiKeys, loadSkills, saveSkills, createAgent, resetProject } from './lib/storage';
+import { Agent, AgentSkill, ApiKeys, SubagentDef } from './lib/types';
+import { loadAgents, saveAgents, loadApiKeys, loadSkills, saveSkills, createAgent, createClaudeAgentFile, generateAgentWithAI, resetProject, syncClaudeSubagents, upgradeAgentsToClaudeCode, parseSubagentFrontmatter } from './lib/storage';
+import { getClaudeCodeAuthStatus, isElectron, onClaudeAgentsChanged, watchProjectAgents } from './lib/terminal';
+import { getWorkspace, setWorkspace } from './lib/filesystem';
 import AgentList from './components/AgentList';
 import AgentEditor from './components/AgentEditor';
 import ChatWindow from './components/ChatWindow';
@@ -10,6 +12,8 @@ import OfficeInstructions, { InstructionRun } from './components/OfficeInstructi
 import AgentTasks from './components/AgentTasks';
 import SkillsPanel from './components/SkillsPanel';
 import MusicPlayer from './components/MusicPlayer';
+import ClaudeCodeStatus from './components/ClaudeCodeStatus';
+import WorkspacePicker from './components/WorkspacePicker';
 
 const OfficeCanvas = lazy(() => import('./components/OfficeCanvas'));
 
@@ -24,14 +28,79 @@ export default function App() {
   const [skills, setSkills] = useState<AgentSkill[]>([]);
   const [instructionRuns, setInstructionRuns] = useState<InstructionRun[]>([]);
   const [instructionRouting, setInstructionRouting] = useState(false);
+  const [claudeReady, setClaudeReady] = useState(false);
+  const [workspaceDir, setWorkspaceDir] = useState<string | null>(null);
+  const [showWorkspacePicker, setShowWorkspacePicker] = useState(false);
+  const [startupDone, setStartupDone] = useState(false);
+  const [hirePrompt, setHirePrompt] = useState<{ resolve: (value: string | null) => void } | null>(null);
 
   useEffect(() => {
-    setAgents(loadAgents());
-    const keys = loadApiKeys();
-    setApiKeys(keys);
-    // Sync GitHub token to main process so git/gh commands have GH_TOKEN
-    (window as Window & { electronAPI?: { setGithubToken?: (t: string) => void } }).electronAPI?.setGithubToken?.(keys.github);
-    setSkills(loadSkills());
+    async function init() {
+      const initialAgents = loadAgents();
+      const keys = loadApiKeys();
+      setApiKeys(keys);
+      (window as Window & { electronAPI?: { setGithubToken?: (t: string) => void } }).electronAPI?.setGithubToken?.(keys.github);
+      setSkills(loadSkills());
+
+      // Load saved workspace dir
+      const savedWs = localStorage.getItem('outworked_workspace_dir');
+
+      // Check Claude Code availability
+      let ccReady = false;
+      if (isElectron()) {
+        try {
+          const authStatus = await getClaudeCodeAuthStatus();
+          ccReady = !!(authStatus.installed && authStatus.authenticated);
+        } catch { /* not available */ }
+      }
+      setClaudeReady(ccReady);
+
+      // If Claude Code is ready, upgrade all default agents to use it
+      let currentAgents = initialAgents;
+      if (ccReady) {
+        currentAgents = upgradeAgentsToClaudeCode(currentAgents);
+      }
+      setAgents(currentAgents);
+
+      // Sync Claude Code subagents (pass workspace for project scope)
+      const wsDir = savedWs || (isElectron() ? await getWorkspace() : undefined);
+      syncClaudeSubagents(currentAgents, wsDir || undefined).then((synced) => {
+        if (synced !== currentAgents) {
+          setAgents(synced);
+        }
+      });
+
+      // Load workspace dir — show picker if none saved
+      if (isElectron()) {
+        if (savedWs) {
+          setWorkspaceDir(savedWs);
+          await setWorkspace(savedWs);
+          watchProjectAgents(savedWs);
+        } else {
+          const defaultDir = await getWorkspace();
+          setWorkspaceDir(defaultDir);
+          watchProjectAgents(defaultDir);
+          setShowWorkspacePicker(true);
+        }
+      }
+
+      setStartupDone(true);
+    }
+    init();
+  }, []);
+
+  // Auto-sync when Claude Code agent files change on disk
+  useEffect(() => {
+    const unsub = onClaudeAgentsChanged(() => {
+      const wsDir = localStorage.getItem('outworked_workspace_dir') || undefined;
+      setAgents((prev) => {
+        syncClaudeSubagents(prev, wsDir).then((synced) => {
+          if (synced !== prev) setAgents(synced);
+        });
+        return prev;
+      });
+    });
+    return unsub;
   }, []);
 
   const selectedAgent = agents.find((a) => a.id === selectedAgentId) ?? null;
@@ -55,14 +124,66 @@ export default function App() {
   }
 
   function handleAddAgent() {
+    if (claudeReady) {
+      // Show the hire prompt modal — the rest happens in the callback
+      new Promise<string | null>((resolve) => {
+        setHirePrompt({ resolve });
+      }).then((description) => {
+        setHirePrompt(null);
+        finishHire(description);
+      });
+    } else {
+      finishHire(null);
+    }
+  }
+
+  function finishHire(description: string | null) {
     const agent = createAgent({
       position: { x: Math.floor(Math.random() * 10) + 2, y: Math.floor(Math.random() * 6) + 2 },
-    });
+    }, claudeReady);
     const next = [...agents, agent];
     setAgents(next);
     saveAgents(next);
     setSelectedAgentId(agent.id);
     setRightPanel('editor');
+
+    if (claudeReady && description) {
+      // AI-generate a full agent .md from the description
+      updateAgent({ ...agent, status: 'thinking', currentThought: 'Being onboarded by AI...' });
+      generateAgentWithAI(description, {
+        workspaceDir: workspaceDir || undefined,
+      }).then((result) => {
+        if (result) {
+          const parsed = parseSubagentFrontmatter(result.content);
+          const name = parsed.def['outworked-name'] || parsed.def.name || agent.name;
+          const role = parsed.def['outworked-role'] || parsed.def.description || agent.role;
+          updateAgent({
+            ...agent,
+            name,
+            role,
+            personality: parsed.body || agent.personality,
+            subagentFile: result.filePath,
+            subagentDef: { description: role, ...parsed.def } as SubagentDef,
+            status: 'idle',
+            currentThought: '',
+          });
+        } else {
+          // Fallback: create a bare stub
+          createClaudeAgentFile(agent, workspaceDir || undefined).then((filePath) => {
+            if (filePath) {
+              updateAgent({ ...agent, subagentFile: filePath, subagentDef: { description: agent.role }, status: 'idle', currentThought: '' });
+            }
+          });
+        }
+      });
+    } else if (claudeReady) {
+      // User cancelled the prompt — create a bare stub
+      createClaudeAgentFile(agent, workspaceDir || undefined).then((filePath) => {
+        if (filePath) {
+          updateAgent({ ...agent, subagentFile: filePath, subagentDef: { description: agent.role } });
+        }
+      });
+    }
   }
 
   function handleSaveAgent(updated: Agent) {
@@ -100,6 +221,19 @@ export default function App() {
     setSelectedAgentId(null);
     setInstructionRuns([]);
     setRightPanel('chat');
+    // Prompt for a new working directory
+    setShowWorkspacePicker(true);
+  }
+
+  async function handleWorkspaceSelected(dir: string) {
+    setWorkspaceDir(dir);
+    localStorage.setItem('outworked_workspace_dir', dir);
+    await setWorkspace(dir);
+    watchProjectAgents(dir);
+    setShowWorkspacePicker(false);
+    // Re-sync to pick up project-level agents
+    const synced = await syncClaudeSubagents(agents, dir);
+    if (synced !== agents) setAgents(synced);
   }
 
   const hasKeys = apiKeys.openai || apiKeys.anthropic || apiKeys.gemini;
@@ -112,6 +246,18 @@ export default function App() {
           <h1 className="text-xs font-pixel text-indigo-300">Outworked</h1>
           <p className="text-[10px] font-pixel text-slate-400 mt-1">AI Agent HQ</p>
         </div>
+        {/* Claude Code status + sync */}
+        <ClaudeCodeStatus />
+        {/* Working directory display */}
+        {workspaceDir && (
+          <button
+            onClick={() => setShowWorkspacePicker(true)}
+            className="px-2 py-1 border-b border-gray-800 text-left hover:bg-slate-800/50 transition-colors group"
+          >
+            <p className="text-[9px] font-pixel text-slate-500 group-hover:text-slate-400">📂 Project Dir</p>
+            <p className="text-[10px] font-mono text-slate-400 group-hover:text-slate-300 truncate">{workspaceDir}</p>
+          </button>
+        )}
         <div className="flex-1 overflow-y-auto">
           <AgentList
             agents={agents}
@@ -140,31 +286,33 @@ export default function App() {
         </div>
       </aside>
 
-      <main className="flex-1 relative overflow-hidden bg-slate-950">
-        <Suspense fallback={<div className="w-full h-full bg-gray-950" />}>
-          <OfficeCanvas
-            agents={agents}
-            selectedAgentId={selectedAgentId}
-            onAgentClick={handleAgentClick}
-          />
-        </Suspense>
-        <div className="absolute bottom-0 left-0 right-0 px-3 py-2 bg-slate-950/90 backdrop-blur-sm border-t border-slate-700 flex gap-4 overflow-x-auto">
-          {agents.filter((a) => a.status !== 'idle' && a.currentThought).map((a) => (
-            <div key={a.id} className="flex items-center gap-1.5 shrink-0">
-              <div className="w-2 h-2 rounded-full animate-pulse" style={{ backgroundColor: a.color }} />
-              <span className="text-[10px] font-pixel text-slate-300">
-                <span style={{ color: a.color }}>{a.name}:</span>{' '}
-                {a.currentThought.slice(0, 50)}{a.currentThought.length > 50 ? '...' : ''}
-              </span>
+      {/* ── Office (unified — includes Claude Code subagent employees) ── */}
+      <>
+        <main className="flex-1 relative overflow-hidden bg-slate-950">
+            <Suspense fallback={<div className="w-full h-full bg-gray-950" />}>
+              <OfficeCanvas
+                agents={agents}
+                selectedAgentId={selectedAgentId}
+                onAgentClick={handleAgentClick}
+              />
+            </Suspense>
+            <div className="absolute bottom-0 left-0 right-0 px-3 py-2 bg-slate-950/90 backdrop-blur-sm border-t border-slate-700 flex gap-4 overflow-x-auto">
+              {agents.filter((a) => a.status !== 'idle' && a.currentThought).map((a) => (
+                <div key={a.id} className="flex items-center gap-1.5 shrink-0">
+                  <div className="w-2 h-2 rounded-full animate-pulse" style={{ backgroundColor: a.color }} />
+                  <span className="text-[10px] font-pixel text-slate-300">
+                    <span style={{ color: a.color }}>{a.name}:</span>{' '}
+                    {a.currentThought.slice(0, 50)}{a.currentThought.length > 50 ? '...' : ''}
+                  </span>
+                </div>
+              ))}
+              {agents.every((a) => a.status === 'idle' || !a.currentThought) && (
+                <span className="text-[10px] font-pixel text-slate-400">
+                  Click an employee to chat!
+                </span>
+              )}
             </div>
-          ))}
-          {agents.every((a) => a.status === 'idle' || !a.currentThought) && (
-            <span className="text-[10px] font-pixel text-slate-400">
-              Click an employee to chat!
-            </span>
-          )}
-        </div>
-      </main>
+          </main>
 
       <aside className="w-80 shrink-0 border-l border-slate-700 flex flex-col bg-slate-900/95 overflow-hidden">
         <div className="flex border-b border-gray-800">
@@ -218,6 +366,7 @@ export default function App() {
               <AgentEditor
                 agent={selectedAgent}
                 apiKeys={apiKeys}
+                workspaceDir={workspaceDir || undefined}
                 onSave={handleSaveAgent}
                 onDelete={handleDeleteAgent}
                 onClose={() => setRightPanel('chat')}
@@ -256,6 +405,7 @@ export default function App() {
           </div>
         </div>
       </aside>
+      </>
 
       {showKeys && (
         <KeysModal
@@ -267,6 +417,48 @@ export default function App() {
           onClose={() => setShowKeys(false)}
         />
       )}
+
+      {showWorkspacePicker && (
+        <WorkspacePicker
+          currentDir={workspaceDir ?? undefined}
+          onSelect={handleWorkspaceSelected}
+          onSkip={() => setShowWorkspacePicker(false)}
+          showSkip={startupDone}
+        />
+      )}
+
+      {hirePrompt && (
+        <HirePromptModal
+          onSubmit={(desc) => hirePrompt.resolve(desc)}
+          onCancel={() => hirePrompt.resolve(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+function HirePromptModal({ onSubmit, onCancel }: { onSubmit: (desc: string) => void; onCancel: () => void }) {
+  const [value, setValue] = useState('');
+  return (
+    <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50" onClick={onCancel}>
+      <div className="bg-slate-800 border border-slate-600 rounded-lg p-5 w-[420px] shadow-xl" onClick={e => e.stopPropagation()}>
+        <h3 className="text-sm font-pixel text-white mb-1">Hire New Employee</h3>
+        <p className="text-[11px] text-slate-400 mb-3">Describe the role and AI will generate a full agent definition.</p>
+        <input
+          autoFocus
+          value={value}
+          onChange={e => setValue(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter' && value.trim()) onSubmit(value.trim()); if (e.key === 'Escape') onCancel(); }}
+          placeholder='e.g. "frontend React developer", "DevOps engineer"'
+          className="w-full input-mono text-[12px] mb-3"
+        />
+        <div className="flex gap-2 justify-end">
+          <button onClick={onCancel} className="btn-pixel bg-slate-700 hover:bg-slate-600 text-[11px]">Skip</button>
+          <button onClick={() => value.trim() ? onSubmit(value.trim()) : onCancel()} className="btn-pixel bg-emerald-700 hover:bg-emerald-600 text-[11px]">
+            ✨ Generate
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

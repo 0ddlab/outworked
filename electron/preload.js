@@ -1,9 +1,11 @@
 const { contextBridge, ipcRenderer } = require("electron");
+const os = require("os");
 
 // Expose a minimal API to the renderer process
 contextBridge.exposeInMainWorld("electronAPI", {
   isElectron: true,
   platform: process.platform,
+  homedir: os.homedir(),
 
   // Filesystem
   fs: {
@@ -58,6 +60,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
         cwd,
         timeoutMs,
       ),
+    startAdvanced: (options) =>
+      ipcRenderer.invoke("claude-code:startAdvanced", options),
     abort: (reqId) => ipcRenderer.invoke("claude-code:abort", reqId),
     onChunk: (cb) => {
       const listener = (_event, reqId, data) => cb(reqId, data);
@@ -74,6 +78,23 @@ contextBridge.exposeInMainWorld("electronAPI", {
       ipcRenderer.on("claude-code:done", listener);
       return () => ipcRenderer.removeListener("claude-code:done", listener);
     },
+    version: () => ipcRenderer.invoke("claude-code:version"),
+    authStatus: () => ipcRenderer.invoke("claude-code:authStatus"),
+    listAgents: (cwd) => ipcRenderer.invoke("claude-code:listAgents", cwd),
+    readAgentFiles: (cwd) =>
+      ipcRenderer.invoke("claude-code:readAgentFiles", cwd),
+    writeAgentFile: (filePath, content) =>
+      ipcRenderer.invoke("claude-code:writeAgentFile", filePath, content),
+    deleteAgentFile: (filePath) =>
+      ipcRenderer.invoke("claude-code:deleteAgentFile", filePath),
+    onAgentsChanged: (cb) => {
+      const listener = () => cb();
+      ipcRenderer.on("claude-code:agents-changed", listener);
+      return () =>
+        ipcRenderer.removeListener("claude-code:agents-changed", listener);
+    },
+    watchProjectAgents: (projectDir) =>
+      ipcRenderer.send("claude-code:watchProjectAgents", projectDir),
   },
 
   // Music
