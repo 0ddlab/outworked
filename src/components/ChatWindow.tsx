@@ -1,10 +1,11 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { Agent, AgentSkill, AgentTodo, /* ApiKeys, */ Message, MODELS, SessionMeta, ToolCall } from '../lib/types';
+import { Agent, AgentSkill, AgentStatus, AgentTodo, Message, MODELS, SessionMeta, ToolCall } from '../lib/types';
 import { sendMessage } from '../lib/ai';
 import { executeTask, generateTodoList, routeTasks } from '../lib/orchestrator';
 import { createAgent, createClaudeAgentFile } from '../lib/storage';
 import { sendClaudeCodeInput, PermissionRequest } from '../lib/terminal';
 import { createSession, saveSession, loadSession, listSessions, deleteSession, searchSessions } from '../lib/sessions';
+import { addExchange, clearExchanges, parseAskRequests } from '../lib/agentBus';
 import MarkdownMessage from './MarkdownMessage';
 
 export interface OrchestrationDoneEvent {
@@ -223,10 +224,105 @@ export default function ChatWindow({ agent, agents, skills, onUpdateAgent, onAdd
       abortRef.current = null;
     }
 
+    // ── Collaboration visual: show agent consulting with another ──
+    // Triggers the walk-to-agent animation and waits for it to be visible
+    // before continuing. Used between sequential task handoffs and for
+    // explicit [ASK:Name] requests.
+    async function showCollaboration(
+      fromAgent: Agent,
+      toAgent: Agent,
+      thought: string,
+      durationMs = 2500,
+    ): Promise<void> {
+      if (debugMode) addDebug(`[collab] ${fromAgent.name} → ${toAgent.name}: ${thought.slice(0, 80)}`);
+
+      // Set collaborating state — triggers Phaser walk animation
+      onUpdateAgent({
+        ...fromAgent,
+        status: 'collaborating' as AgentStatus,
+        collaboratingWith: toAgent.id,
+        currentThought: thought,
+      });
+      onUpdateAgent({
+        ...toAgent,
+        status: 'speaking',
+        currentThought: `Talking with ${fromAgent.name}`,
+      });
+
+      // Hold the visual for the duration so users can see it
+      await new Promise(resolve => setTimeout(resolve, durationMs));
+
+      // Reset
+      onUpdateAgent({ ...fromAgent, status: 'working', collaboratingWith: undefined, currentThought: '' });
+      onUpdateAgent({ ...toAgent, status: 'idle', currentThought: '' });
+    }
+
+    // ── Post-step collaboration handler ─────────────────────────
+    // Scans reply for [ASK:Name] patterns, sends question to colleague,
+    // and returns their answer as context.
+    async function handleCollaborationRequests(
+      askingAgent: Agent,
+      reply: string,
+      availableAgents: Agent[],
+    ): Promise<string> {
+      const asks = parseAskRequests(reply);
+      if (asks.length === 0) return '';
+
+      const answers: string[] = [];
+      for (const ask of asks) {
+        const target = availableAgents.find(
+          a => a.name.toLowerCase() === ask.agentName.toLowerCase() && a.id !== askingAgent.id,
+        );
+        if (!target) {
+          answers.push(`[${ask.agentName} not found — no colleague with that name]`);
+          continue;
+        }
+
+        // Visual: asking agent walks to target
+        onUpdateAgent({
+          ...askingAgent,
+          status: 'collaborating' as AgentStatus,
+          collaboratingWith: target.id,
+          currentThought: `💬 Asking ${target.name}...`,
+        });
+        onUpdateAgent({
+          ...target,
+          status: 'thinking',
+          currentThought: `${askingAgent.name} asked: ${ask.question.slice(0, 60)}`,
+        });
+
+        try {
+          const response = await sendMessage(
+            { ...target, history: [] },
+            `[COLLEAGUE QUESTION from ${askingAgent.name}]: ${ask.question}\n\nPlease answer this question from your colleague concisely.`,
+            EMPTY_KEYS,
+            (partial) => onUpdateAgent({
+              ...target,
+              status: 'working',
+              currentThought: partial.slice(0, 80) + (partial.length > 80 ? '...' : ''),
+            }),
+            abortRef.current?.signal,
+            { useTools: false, skills },
+          );
+
+          addExchange(askingAgent.id, askingAgent.name, target.id, target.name, ask.question, response);
+          answers.push(`[${target.name} replied]: ${response}`);
+        } catch (err) {
+          answers.push(`[Error asking ${target.name}: ${err instanceof Error ? err.message : 'Unknown error'}]`);
+        } finally {
+          onUpdateAgent({ ...target, status: 'idle', currentThought: '' });
+          onUpdateAgent({ ...askingAgent, status: 'working', collaboratingWith: undefined, currentThought: 'Processing colleague input...' });
+        }
+      }
+
+      return '\n\nColleague responses:\n' + answers.join('\n');
+    }
+
     // ── Boss orchestrator flow ───────────────────────────────────
     // The Boss ALWAYS delegates: plans tasks via JSON, then dispatches
     // each task to the assigned employee as a separate Claude Code process.
     async function handleBossOrchestrate(bossAgent: Agent, userText: string): Promise<string> {
+      clearExchanges(); // Reset inter-agent message log for this run
       const employees = agents.filter(a => !a.isBoss);
 
       // ── Step 1: Plan ──
@@ -305,6 +401,20 @@ export default function ChatWindow({ agent, agents, skills, onUpdateAgent, onAdd
           continue;
         }
 
+        // ── Collaboration handoff: show current agent consulting previous agent ──
+        if (idx > 0 && taskResults[idx - 1]?.success) {
+          const prevAssignment = assignments[idx - 1];
+          const prevEmp = allEmployees.find(a => a.id === prevAssignment.agentId);
+          if (prevEmp && prevEmp.id !== emp.id) {
+            await showCollaboration(
+              emp,
+              prevEmp,
+              `💬 Getting context from ${prevEmp.name}`,
+              2000,
+            );
+          }
+        }
+
         // Mark boss todo in-progress
         bossTodos[idx] = { ...bossTodos[idx], status: 'in-progress' };
         onUpdateAgent({
@@ -356,8 +466,14 @@ export default function ChatWindow({ agent, agents, skills, onUpdateAgent, onAdd
               EMPTY_KEYS,
               (partial) => onUpdateAgent({ ...currentAgent, status: 'working', currentThought: `[${ti + 1}/${empTodos.length}] ${partial.slice(0, 70)}` }),
               abortRef.current?.signal, skills,
+              undefined, // workingDirectory
+              undefined, // customToolExecutor
+              allEmployees.filter(a => a.id !== currentAgent.id).map(a => ({ name: a.name, role: a.role })),
             );
-            replies.push(reply);
+
+            // Check for collaboration requests in the reply
+            const collabContext = await handleCollaborationRequests(currentAgent, reply, allEmployees);
+            replies.push(reply + collabContext);
 
             // Mark this todo done, update agent with new history
             currentAgent = {
@@ -436,7 +552,8 @@ export default function ChatWindow({ agent, agents, skills, onUpdateAgent, onAdd
 
     // ── Regular agent chat flow ──────────────────────────────────
     async function handleRegularChat(agentState: Agent, userText: string): Promise<string> {
-      return await sendMessage(
+      const otherAgents = agents.filter(a => a.id !== agentState.id && !a.isBoss);
+      const reply = await sendMessage(
         agentState,
         userText,
         EMPTY_KEYS,
@@ -499,8 +616,29 @@ export default function ChatWindow({ agent, agents, skills, onUpdateAgent, onAdd
             setPendingPermission(request);
           },
           onStderr: debugMode ? (text) => addDebug(`[stderr] ${text.trim()}`) : undefined,
+          colleagues: otherAgents.map(a => ({ name: a.name, role: a.role })),
         },
       );
+
+      // Handle any [ASK:Name] collaboration requests in the reply
+      const collabContext = await handleCollaborationRequests(agentState, reply, agents);
+      if (collabContext) {
+        // Send a follow-up with the colleague responses so the agent can incorporate them
+        const followUp = await sendMessage(
+          { ...agentState, history: [...agentState.history, { role: 'user', content: userText, timestamp: Date.now() }, { role: 'assistant', content: reply, timestamp: Date.now() }] },
+          `Here are the responses from your colleagues:\n${collabContext}\n\nPlease incorporate their input and provide your updated response.`,
+          EMPTY_KEYS,
+          (partial) => {
+            setStreamingText(partial);
+            onUpdateAgent({ ...agentState, status: 'speaking', currentThought: partial.slice(0, 80) + (partial.length > 80 ? '...' : '') });
+          },
+          abortRef.current!.signal,
+          { skills, useTools: false, colleagues: otherAgents.map(a => ({ name: a.name, role: a.role })) },
+        );
+        return followUp;
+      }
+
+      return reply;
     }
   }
 

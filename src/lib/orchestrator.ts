@@ -219,6 +219,8 @@ export async function executeTask(
   signal?: AbortSignal,
   skills?: AgentSkill[],
   workingDirectory?: string,
+  customToolExecutor?: (name: string, args: Record<string, unknown>) => Promise<string | null>,
+  colleagues?: { name: string; role: string }[],
 ): Promise<{ agent: Agent; reply: string }> {
   // Build a strong system-level directive so agents respect the working directory
   const extraSystemPrompt = workingDirectory
@@ -244,7 +246,7 @@ export async function executeTask(
     keys,
     onThought,
     signal,
-    { skills, extraSystemPrompt },
+    { skills, extraSystemPrompt, customToolExecutor, colleagues },
   );
 
   const assistantMsg: Message = {

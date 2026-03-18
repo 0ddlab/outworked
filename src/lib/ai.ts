@@ -22,6 +22,11 @@ You have access to the local filesystem, sandboxed code execution, and a local t
 - assign_task: (Boss only) Delegate a task to an employee — they will execute it autonomously
 
 Workflow: For multi-step tasks, ALWAYS call update_todos first to plan, then work through each step, updating todo statuses as you go. When coding: 1) plan with update_todos, 2) write files, 3) run_command to test, 4) mark todos done.
+
+## Asking Colleagues
+If you need information or expertise from a colleague, include this exact format in your response:
+[ASK:ColleagueName] Your question here
+The system will route your question and provide their answer before your next step. Only ask when you genuinely need their input.
 When writing code for a website, always start the frontend in dev mode to present it to the user right away, then iterate based on feedback. 
 You can have multiple files open at once, but only one terminal command running at a time. Use the terminal for any command you would normally run in a shell, including starting dev servers, git commands, and npm installs.
 `;
@@ -48,6 +53,7 @@ export interface SendOptions {
   extraTools?: ToolDefinition[]; // additional tools (e.g. assign_task for boss)
   extraSystemPrompt?: string; // appended to the system prompt
   customToolExecutor?: (name: string, args: Record<string, unknown>) => Promise<string | null>; // return string to override default executeTool, null to use default
+  colleagues?: { name: string; role: string }[]; // other agents available for ask_agent
   onClaudeCodeEvent?: (event: { type: string; toolName?: string; toolInput?: Record<string, unknown>; text?: string }) => void;
   onPermissionRequest?: (request: PermissionRequest) => void;
   onStderr?: (text: string) => void;
@@ -64,6 +70,12 @@ export async function sendMessage(
   const useTools = options?.useTools !== false;
   const workspace = useTools ? await getWorkspace() : '';
   let systemPrompt = buildSystemPrompt(agent, useTools, workspace, options?.skills);
+  if (options?.colleagues && options.colleagues.length > 0) {
+    systemPrompt += '\n\n## Colleagues\nYou can ask these colleagues questions using [ASK:Name] format:\n';
+    for (const c of options.colleagues) {
+      systemPrompt += `- **${c.name}** — ${c.role}\n`;
+    }
+  }
   if (options?.extraSystemPrompt) systemPrompt += options.extraSystemPrompt;
   const messages: Message[] = [
     ...agent.history,

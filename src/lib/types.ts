@@ -74,7 +74,7 @@ export interface ToolCall {
   result: string;
 }
 
-export type AgentStatus = 'idle' | 'thinking' | 'working' | 'speaking' | 'waiting-input' | 'waiting-approval' | 'stuck';
+export type AgentStatus = 'idle' | 'thinking' | 'working' | 'speaking' | 'collaborating' | 'waiting-input' | 'waiting-approval' | 'stuck';
 
 export type AgentScope = 'user' | 'project';
 
@@ -142,6 +142,18 @@ export interface Agent {
   agentScope?: AgentScope; // 'user' (~/.claude/agents/) or 'project' (.claude/agents/)
   sessionId?: string; // Claude Code session ID for continuity
   currentSessionId?: string; // active Outworked session ID (for persistence)
+  collaboratingWith?: string; // id of agent being consulted (ephemeral, drives walk animation)
+}
+
+export interface AgentMessage {
+  id: string;
+  fromAgentId: string;
+  fromAgentName: string;
+  toAgentId: string;
+  toAgentName: string;
+  question: string;
+  response?: string;
+  timestamp: number;
 }
 
 export interface ApiKeys {

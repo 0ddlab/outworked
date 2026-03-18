@@ -82,7 +82,8 @@ export class OfficeScene extends Phaser.Scene {
   private officeGraphics?: Phaser.GameObjects.Graphics;
   private deskPositions: { x: number; y: number }[] = []; // tile positions of desk chairs
   /** Snapshot of last-rendered agent state, keyed by id */
-  private agentSnapshot: Map<string, { status: string; name: string; role: string; color: string; thought: string }> = new Map();
+  private agentSnapshot: Map<string, { status: string; name: string; role: string; color: string; thought: string; collaboratingWith?: string }> = new Map();
+  private collaborationLines: Map<string, Phaser.GameObjects.Graphics> = new Map();
   private resizeTimer?: ReturnType<typeof setTimeout>;
 
   constructor() {
@@ -163,8 +164,8 @@ export class OfficeScene extends Phaser.Scene {
       ) {
         // Identity changed → full rebuild needed
         toRebuild.add(agent.id);
-      } else if (snap.status !== agent.status) {
-        // Status only changed → smooth transition (no rebuild)
+      } else if (snap.status !== agent.status || snap.collaboratingWith !== agent.collaboratingWith) {
+        // Status or collaboration changed → smooth transition (no rebuild)
         toTransition.add(agent.id);
       }
     }
@@ -202,6 +203,7 @@ export class OfficeScene extends Phaser.Scene {
           status: agent.status, name: agent.name,
           role: agent.role, color: agent.color,
           thought: agent.currentThought ?? '',
+          collaboratingWith: agent.collaboratingWith,
         });
         // If a thought bubble is currently visible, refresh it
         if (this.thoughtBubbles.has(agent.id)) {
@@ -776,7 +778,7 @@ export class OfficeScene extends Phaser.Scene {
   private assignDesks() {
     const usedDesks = new Set<number>();
     for (const agent of this.agents) {
-      if (agent.status !== 'idle') {
+      if (agent.status !== 'idle' && agent.status !== 'collaborating') {
         let bestIdx = -1;
         let bestDist = Infinity;
         for (let i = 0; i < this.deskPositions.length; i++) {
@@ -808,6 +810,12 @@ export class OfficeScene extends Phaser.Scene {
       this.agentSprites.delete(id);
     }
     this.hideThoughtBubble(id);
+    const collabLine = this.collaborationLines.get(id);
+    if (collabLine) {
+      this.tweens.killTweensOf(collabLine);
+      collabLine.destroy();
+      this.collaborationLines.delete(id);
+    }
     const timer = this.walkTimers.get(id);
     if (timer) {
       timer.destroy();
@@ -821,6 +829,7 @@ export class OfficeScene extends Phaser.Scene {
       case 'thinking': return 'think';
       case 'working': return 'type';
       case 'speaking': return 'type';
+      case 'collaborating': return 'walk';
       default: return 'idle';
     }
   }
@@ -883,7 +892,7 @@ export class OfficeScene extends Phaser.Scene {
     container.add(roleText);
 
     // Status indicator — pill badge
-    const statusColor = agent.status === 'thinking' ? 0xf39c12 : agent.status === 'working' ? 0x2ecc71 : agent.status === 'speaking' ? 0x3498db : agent.status === 'waiting-approval' ? 0xeab308 : agent.status === 'waiting-input' ? 0xf97316 : agent.status === 'stuck' ? 0xef4444 : 0x7f8c8d;
+    const statusColor = agent.status === 'thinking' ? 0xf39c12 : agent.status === 'working' ? 0x2ecc71 : agent.status === 'speaking' ? 0x3498db : agent.status === 'collaborating' ? 0x9b59b6 : agent.status === 'waiting-approval' ? 0xeab308 : agent.status === 'waiting-input' ? 0xf97316 : agent.status === 'stuck' ? 0xef4444 : 0x7f8c8d;
     const statusGfx = this.add.graphics();
     statusGfx.setName('statusDot');
     // Outer ring
@@ -951,6 +960,7 @@ export class OfficeScene extends Phaser.Scene {
       role: agent.role,
       color: agent.color,
       thought: agent.currentThought ?? '',
+      collaboratingWith: agent.collaboratingWith,
     });
   }
 
@@ -1048,7 +1058,7 @@ export class OfficeScene extends Phaser.Scene {
     if (oldStatusGfx) {
       oldStatusGfx.destroy();
     }
-    const statusColor = agent.status === 'thinking' ? 0xf39c12 : agent.status === 'working' ? 0x2ecc71 : agent.status === 'speaking' ? 0x3498db : agent.status === 'waiting-approval' ? 0xeab308 : agent.status === 'waiting-input' ? 0xf97316 : agent.status === 'stuck' ? 0xef4444 : 0x7f8c8d;
+    const statusColor = agent.status === 'thinking' ? 0xf39c12 : agent.status === 'working' ? 0x2ecc71 : agent.status === 'speaking' ? 0x3498db : agent.status === 'collaborating' ? 0x9b59b6 : agent.status === 'waiting-approval' ? 0xeab308 : agent.status === 'waiting-input' ? 0xf97316 : agent.status === 'stuck' ? 0xef4444 : 0x7f8c8d;
     const statusGfx = this.add.graphics();
     statusGfx.setName('statusDot');
     statusGfx.fillStyle(0x000000, 0.3);
@@ -1071,9 +1081,33 @@ export class OfficeScene extends Phaser.Scene {
       });
     }
 
-    // Smoothly tween to new position (desk or wherever)
-    const targetX = agent.position.x * TILE + TILE / 2;
-    const targetY = agent.position.y * TILE + TILE / 2;
+    // Clean up any existing collaboration line
+    const oldLine = this.collaborationLines.get(agent.id);
+    if (oldLine) {
+      oldLine.destroy();
+      this.collaborationLines.delete(agent.id);
+    }
+
+    // Determine target position: walk to colleague if collaborating, otherwise to desk
+    let targetX: number;
+    let targetY: number;
+
+    if (agent.status === 'collaborating' && agent.collaboratingWith) {
+      // Walk to the target agent's assigned position (offset to stand beside them)
+      const targetAgent = this.agents.find(a => a.id === agent.collaboratingWith);
+      if (targetAgent) {
+        // Use the target's position (updated by assignDesks), not stale container coords
+        targetX = targetAgent.position.x * TILE + TILE / 2 + TILE * 0.6;
+        targetY = targetAgent.position.y * TILE + TILE / 2;
+      } else {
+        targetX = agent.position.x * TILE + TILE / 2;
+        targetY = agent.position.y * TILE + TILE / 2;
+      }
+    } else {
+      targetX = agent.position.x * TILE + TILE / 2;
+      targetY = agent.position.y * TILE + TILE / 2;
+    }
+
     const dx = Math.abs(container.x - targetX);
     const dy = Math.abs(container.y - targetY);
     const distance = Math.sqrt(dx * dx + dy * dy);
@@ -1102,6 +1136,10 @@ export class OfficeScene extends Phaser.Scene {
           this.startIdleBob(container, targetY);
           this.scheduleWalk(agent.id);
         }
+        // Draw collaboration line when arrived at colleague
+        if (agent.status === 'collaborating' && agent.collaboratingWith) {
+          this.drawCollaborationLine(agent.id, agent.collaboratingWith);
+        }
       },
     });
 
@@ -1112,7 +1150,56 @@ export class OfficeScene extends Phaser.Scene {
       role: agent.role,
       color: agent.color,
       thought: agent.currentThought ?? '',
+      collaboratingWith: agent.collaboratingWith,
     });
+  }
+
+  /** Draw a visual connector between two collaborating agents */
+  private drawCollaborationLine(fromId: string, toId: string) {
+    const fromContainer = this.agentSprites.get(fromId);
+    const toContainer = this.agentSprites.get(toId);
+    if (!fromContainer || !toContainer) return;
+
+    const gfx = this.add.graphics();
+    gfx.lineStyle(2, 0x9b59b6, 0.5);
+
+    // Use current container positions (after tween completion)
+    const x1 = fromContainer.x;
+    const y1 = fromContainer.y - 10;
+    const x2 = toContainer.x;
+    const y2 = toContainer.y - 10;
+    const segments = 8;
+    for (let i = 0; i < segments; i += 2) {
+      const t1 = i / segments;
+      const t2 = (i + 1) / segments;
+      gfx.beginPath();
+      gfx.moveTo(x1 + (x2 - x1) * t1, y1 + (y2 - y1) * t1);
+      gfx.lineTo(x1 + (x2 - x1) * t2, y1 + (y2 - y1) * t2);
+      gfx.strokePath();
+    }
+
+    // Small speech bubble icon at midpoint
+    const mx = (x1 + x2) / 2;
+    const my = (y1 + y2) / 2 - 8;
+    gfx.fillStyle(0x9b59b6, 0.7);
+    gfx.fillRoundedRect(mx - 8, my - 6, 16, 12, 3);
+    gfx.fillTriangle(mx - 2, my + 6, mx + 2, my + 6, mx, my + 10);
+    gfx.fillStyle(0xffffff, 0.9);
+    gfx.fillCircle(mx - 3, my, 1.5);
+    gfx.fillCircle(mx, my, 1.5);
+    gfx.fillCircle(mx + 3, my, 1.5);
+
+    // Pulse the line
+    this.tweens.add({
+      targets: gfx,
+      alpha: { from: 0.4, to: 1 },
+      duration: 800,
+      yoyo: true,
+      repeat: -1,
+      ease: 'Sine.easeInOut',
+    });
+
+    this.collaborationLines.set(fromId, gfx);
   }
 
   /** Start a gentle idle bob animation on a container */
