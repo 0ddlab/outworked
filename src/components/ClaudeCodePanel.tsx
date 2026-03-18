@@ -18,6 +18,7 @@ import {
   type SubagentDef,
   type ClaudeSettingsJson,
 } from '../lib/terminal';
+import { addCumulativeCost, resetCumulativeSession } from '../lib/costs';
 
 // ─── Types ────────────────────────────────────────────────────────
 
@@ -913,6 +914,7 @@ export default function ClaudeCodePanel({ workspace }: { workspace: string }) {
   useEffect(() => {
     if (prevWorkspaceRef.current !== workspace) {
       prevWorkspaceRef.current = workspace;
+      if (sessionInfo.id) resetCumulativeSession(sessionInfo.id);
       setMessages([]);
       setSessionInfo({});
       setStderrLog([]);
@@ -1048,6 +1050,12 @@ export default function ClaudeCodePanel({ workspace }: { workspace: string }) {
         inputTokens: result.usage?.input_tokens,
         outputTokens: result.usage?.output_tokens,
       });
+
+      // Track cost in the cost dashboard (delta from cumulative total_cost_usd)
+      if (result.cost !== undefined && result.cost > 0) {
+        const sessionKey = actualSession || 'claude-code-panel';
+        addCumulativeCost('claude-code-panel', 'Claude Code', result.cost, result.usage?.input_tokens || 0, result.usage?.output_tokens || 0, sessionKey);
+      }
     } catch (err) {
       if (!controller.signal.aborted) {
         const errMsg = (err as Error).message;
@@ -1078,6 +1086,7 @@ export default function ClaudeCodePanel({ workspace }: { workspace: string }) {
   }
 
   function handleClearSession() {
+    if (sessionInfo.id) resetCumulativeSession(sessionInfo.id);
     setMessages([]);
     setSessionInfo({});
     setStderrLog([]);

@@ -17,6 +17,7 @@ import WorkspacePicker from './components/WorkspacePicker';
 import PermissionsPanel, { PermissionsBanner } from './components/PermissionsPanel';
 import WorkspacePanel from './components/WorkspacePanel';
 import GitPanel from './components/GitPanel';
+import CostDashboard from './components/CostDashboard';
 
 const OfficeCanvas = lazy(() => import('./components/OfficeCanvas'));
 
@@ -35,6 +36,7 @@ export default function App() {
   const [startupDone, setStartupDone] = useState(false);
   const [hirePrompt, setHirePrompt] = useState<{ resolve: (value: string | null) => void } | null>(null);
   const [showPermsModal, setShowPermsModal] = useState(false);
+  const [showCostsModal, setShowCostsModal] = useState(false);
   const [permsEmpty, setPermsEmpty] = useState(false);
   const [permsDismissed, setPermsDismissed] = useState(false);
   const [debugMode, setDebugMode] = useState(() => localStorage.getItem('outworked_debug') === '1');
@@ -332,12 +334,20 @@ export default function App() {
           >
             {agentTeamsEnabled ? '👥 Teams ON' : '👤 Teams OFF'}
           </button>
-          <button
-            onClick={() => setShowPermsModal(true)}
-            className={`w-full btn-pixel text-[10px] ${permsEmpty && !permsDismissed ? 'bg-amber-700 hover:bg-amber-600 text-amber-50 animate-pulse' : 'bg-slate-700 hover:bg-slate-600 text-slate-200'}`}
-          >
-            🔒 Permissions
-          </button>
+          <div className="flex gap-1.5">
+            <button
+              onClick={() => setShowPermsModal(true)}
+              className={`flex-1 btn-pixel text-[10px] ${permsEmpty && !permsDismissed ? 'bg-amber-700 hover:bg-amber-600 text-amber-50 animate-pulse' : 'bg-slate-700 hover:bg-slate-600 text-slate-200'}`}
+            >
+              🔒 Perms
+            </button>
+            <button
+              onClick={() => setShowCostsModal(true)}
+              className="flex-1 btn-pixel text-[10px] bg-slate-700 hover:bg-slate-600 text-slate-200"
+            >
+              💰 Costs
+            </button>
+          </div>
           <div className="flex gap-1.5">
             <button
               onClick={toggleDebug}
@@ -551,6 +561,20 @@ export default function App() {
             </div>
             <div className="flex-1 overflow-y-auto">
               <PermissionsPanel workspace={workspaceDir} onSaved={() => setPermsEmpty(false)} />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showCostsModal && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50" onClick={() => setShowCostsModal(false)}>
+          <div className="bg-slate-800 border border-slate-600 rounded-lg w-[480px] max-h-[80vh] shadow-xl flex flex-col" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-4 py-3 border-b border-slate-700">
+              <h3 className="text-sm font-pixel text-white">💰 Cost & Token Dashboard</h3>
+              <button onClick={() => setShowCostsModal(false)} className="text-slate-400 hover:text-white text-sm">✕</button>
+            </div>
+            <div className="flex-1 overflow-y-auto" style={{ minHeight: '400px' }}>
+              <CostDashboard agents={agents} />
             </div>
           </div>
         </div>

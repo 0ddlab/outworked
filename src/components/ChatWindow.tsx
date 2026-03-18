@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { Agent, AgentSkill, AgentStatus, AgentTodo, Message, MODELS, SessionMeta, ToolCall } from '../lib/types';
-import { sendMessage } from '../lib/ai';
+import { sendMessage, sendMessageWithCost } from '../lib/ai';
+import { addCumulativeCost } from '../lib/costs';
 import { executeTask, generateTodoList, routeTasks } from '../lib/orchestrator';
 import { createAgent, createClaudeAgentFile } from '../lib/storage';
 import { sendClaudeCodeInput, PermissionRequest } from '../lib/terminal';
@@ -553,7 +554,7 @@ export default function ChatWindow({ agent, agents, skills, onUpdateAgent, onAdd
     // ── Regular agent chat flow ──────────────────────────────────
     async function handleRegularChat(agentState: Agent, userText: string): Promise<string> {
       const otherAgents = agents.filter(a => a.id !== agentState.id && !a.isBoss);
-      const reply = await sendMessage(
+      const result = await sendMessageWithCost(
         agentState,
         userText,
         EMPTY_KEYS,
@@ -620,11 +621,19 @@ export default function ChatWindow({ agent, agents, skills, onUpdateAgent, onAdd
         },
       );
 
+      const reply = result.text;
+
+      // Track cost (delta from cumulative total_cost_usd)
+      if (result.cost !== undefined && result.cost > 0) {
+        const sessionKey = agentState.sessionId || agentState.id;
+        addCumulativeCost(agentState.id, agentState.name, result.cost, result.inputTokens || 0, result.outputTokens || 0, sessionKey);
+      }
+
       // Handle any [ASK:Name] collaboration requests in the reply
       const collabContext = await handleCollaborationRequests(agentState, reply, agents);
       if (collabContext) {
         // Send a follow-up with the colleague responses so the agent can incorporate them
-        const followUp = await sendMessage(
+        const followUpResult = await sendMessageWithCost(
           { ...agentState, history: [...agentState.history, { role: 'user', content: userText, timestamp: Date.now() }, { role: 'assistant', content: reply, timestamp: Date.now() }] },
           `Here are the responses from your colleagues:\n${collabContext}\n\nPlease incorporate their input and provide your updated response.`,
           EMPTY_KEYS,
@@ -635,7 +644,11 @@ export default function ChatWindow({ agent, agents, skills, onUpdateAgent, onAdd
           abortRef.current!.signal,
           { skills, useTools: false, colleagues: otherAgents.map(a => ({ name: a.name, role: a.role })) },
         );
-        return followUp;
+        if (followUpResult.cost !== undefined && followUpResult.cost > 0) {
+          const sessionKey = agentState.sessionId || agentState.id;
+          addCumulativeCost(agentState.id, agentState.name, followUpResult.cost, followUpResult.inputTokens || 0, followUpResult.outputTokens || 0, sessionKey);
+        }
+        return followUpResult.text;
       }
 
       return reply;
