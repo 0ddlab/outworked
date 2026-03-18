@@ -131,7 +131,7 @@ export default function MusicPlayer() {
       </button>
 
       {/* Track name – marquee scroll */}
-      <div className="overflow-hidden max-w-[70px]">
+      <div className="overflow-hidden max-w-[100px]">
         <span
           className="text-[11px] font-pixel text-slate-300 inline-block whitespace-nowrap animate-marquee"
           title={track!.title}

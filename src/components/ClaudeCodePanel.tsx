@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
+import MarkdownMessage from './MarkdownMessage';
 import {
   runClaudeCodeAdvanced,
   getClaudeCodeVersion,
@@ -1200,7 +1201,7 @@ export default function ClaudeCodePanel({ workspace }: { workspace: string }) {
               {isRunning && (
                 <div className="flex items-center gap-2 text-[10px] text-purple-400 font-pixel">
                   <div className="w-1.5 h-1.5 rounded-full bg-purple-400 animate-pulse" />
-                  Claude Code is working…
+                  Claude Code is thinking...
                 </div>
               )}
             </div>
@@ -1318,8 +1319,8 @@ function MessageBubble({ message }: { message: SessionMessage }) {
   // assistant
   return (
     <div className="max-w-[95%]">
-      <div className="px-3 py-1.5 rounded-lg bg-slate-800/50 border border-slate-700/30 text-xs text-slate-200 whitespace-pre-wrap leading-relaxed">
-        {content}
+      <div className="px-3 py-1.5 rounded-lg bg-slate-800/50 border border-slate-700/30 text-xs text-slate-200 leading-relaxed">
+        <MarkdownMessage content={content} />
       </div>
     </div>
   );

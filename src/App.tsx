@@ -15,10 +15,11 @@ import MusicPlayer from './components/MusicPlayer';
 import ClaudeCodeStatus from './components/ClaudeCodeStatus';
 import WorkspacePicker from './components/WorkspacePicker';
 import PermissionsPanel, { PermissionsBanner } from './components/PermissionsPanel';
+import WorkspacePanel from './components/WorkspacePanel';
 
 const OfficeCanvas = lazy(() => import('./components/OfficeCanvas'));
 
-type RightPanel = 'chat' | 'editor' | 'terminal' | 'instructions' | 'tasks';
+type RightPanel = 'chat' | 'editor' | 'terminal' | 'workspace' | 'instructions' | 'tasks';
 
 export default function App() {
   const [agents, setAgents] = useState<Agent[]>([]);
@@ -469,6 +470,12 @@ export default function App() {
             </button>
           )}
           <button
+            onClick={() => setRightPanel('workspace')}
+            className={`flex-1 py-2 text-[10px] font-pixel leading-relaxed transition-colors ${rightPanel === 'workspace' ? 'text-white border-b-2 border-indigo-500 bg-gray-800' : 'text-gray-500 hover:text-gray-300'}`}
+          >
+            Files
+          </button>
+          <button
             onClick={() => setRightPanel('terminal')}
             className={`flex-1 py-2 text-[10px] font-pixel leading-relaxed transition-colors ${rightPanel === 'terminal' ? 'text-white border-b-2 border-indigo-500 bg-gray-800' : 'text-gray-500 hover:text-gray-300'}`}
           >
@@ -477,7 +484,7 @@ export default function App() {
 
         </div>
         <div className="flex-1 overflow-hidden relative">
-          {rightPanel !== 'terminal' && (
+          {rightPanel !== 'terminal' && rightPanel !== 'workspace' && (
             rightPanel === 'chat' ? (
               <ChatWindow
                 agent={selectedAgent}
@@ -504,6 +511,10 @@ export default function App() {
               />
             ) : null
           )}
+          {/* Workspace panel — always mounted to preserve watcher; hidden when not active */}
+          <div className={`absolute inset-0 ${rightPanel === 'workspace' ? '' : 'invisible pointer-events-none'}`}>
+            <WorkspacePanel workspaceDir={workspaceDir} />
+          </div>
           {/* Terminal is always mounted to preserve shell session; hidden when not active */}
           <div className={`absolute inset-0 ${rightPanel === 'terminal' ? '' : 'invisible pointer-events-none'}`}>
             <TerminalPanel agents={agents} workspaceDir={workspaceDir} />

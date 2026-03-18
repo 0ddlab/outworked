@@ -142,7 +142,7 @@ async function callClaudeCode(
 
   // Fallback: simple mode for regular claude-code agents
   let fullText = '';
-  onThought('🤖 Claude Code is working…');
+  onThought('🤖 Claude Code is thinking...');
 
   const output = await runClaudeCode(
     prompt,
@@ -196,7 +196,7 @@ async function callClaudeCodeAdvanced(
   };
 
   let fullText = '';
-  onThought('🤖 Claude Code is working…');
+  onThought('🤖 Claude Code is thinking...');
 
   const callbacks: ClaudeCodeStreamCallbacks = {
     onTextDelta: (text) => {

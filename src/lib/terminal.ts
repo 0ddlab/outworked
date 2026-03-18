@@ -138,6 +138,19 @@ interface ElectronAPI {
     readClaudeMd: () => Promise<{ ok: boolean; content?: string; exists?: boolean; error?: string }>;
     writeClaudeMd: (content: string) => Promise<{ ok: boolean; error?: string }>;
   };
+  watcher?: {
+    watchWorkspace: (dir: string) => void;
+    unwatchWorkspace: () => void;
+    onFileChanged: (cb: (data: { eventType: string; filename: string }) => void) => () => void;
+    onFileTreeChanged: (cb: () => void) => () => void;
+  };
+  git?: {
+    status: (cwd?: string) => Promise<GitStatusResult>;
+    diff: (cwd?: string, ref?: string, filepath?: string) => Promise<GitDiffResult>;
+    diffStat: (cwd?: string) => Promise<{ ok: boolean; stat?: string; error?: string }>;
+    log: (cwd?: string) => Promise<{ ok: boolean; log?: string; error?: string }>;
+    stashRef: (cwd?: string) => Promise<{ ok: boolean; ref?: string; error?: string }>;
+  };
 }
 
 function getAPI(): ElectronAPI | null {
@@ -541,4 +554,77 @@ export async function writeClaudeMd(content: string): Promise<boolean> {
   if (!api?.claudeSettings) return false;
   const result = await api.claudeSettings.writeClaudeMd(content);
   return result.ok;
+}
+
+// ─── File Watcher ─────────────────────────────────────────────────
+
+export function watchWorkspace(dir: string): void {
+  const api = getAPI();
+  api?.watcher?.watchWorkspace(dir);
+}
+
+export function unwatchWorkspace(): void {
+  const api = getAPI();
+  api?.watcher?.unwatchWorkspace();
+}
+
+export function onFileChanged(cb: (data: { eventType: string; filename: string }) => void): () => void {
+  const api = getAPI();
+  if (!api?.watcher?.onFileChanged) return () => {};
+  return api.watcher.onFileChanged(cb);
+}
+
+export function onFileTreeChanged(cb: () => void): () => void {
+  const api = getAPI();
+  if (!api?.watcher?.onFileTreeChanged) return () => {};
+  return api.watcher.onFileTreeChanged(cb);
+}
+
+// ─── Git ──────────────────────────────────────────────────────────
+
+export interface GitStatusFile {
+  status: string;
+  path: string;
+}
+
+export interface GitStatusResult {
+  ok: boolean;
+  files?: GitStatusFile[];
+  error?: string;
+}
+
+export interface GitDiffResult {
+  ok: boolean;
+  diff?: string;
+  error?: string;
+}
+
+export async function gitStatus(cwd?: string): Promise<GitStatusResult> {
+  const api = getAPI();
+  if (!api?.git) return { ok: false, error: 'Not in Electron' };
+  return api.git.status(cwd);
+}
+
+export async function gitDiff(cwd?: string, ref?: string, filepath?: string): Promise<GitDiffResult> {
+  const api = getAPI();
+  if (!api?.git) return { ok: false, error: 'Not in Electron' };
+  return api.git.diff(cwd, ref, filepath);
+}
+
+export async function gitDiffStat(cwd?: string): Promise<{ ok: boolean; stat?: string; error?: string }> {
+  const api = getAPI();
+  if (!api?.git) return { ok: false, error: 'Not in Electron' };
+  return api.git.diffStat(cwd);
+}
+
+export async function gitLog(cwd?: string): Promise<{ ok: boolean; log?: string; error?: string }> {
+  const api = getAPI();
+  if (!api?.git) return { ok: false, error: 'Not in Electron' };
+  return api.git.log(cwd);
+}
+
+export async function gitStashRef(cwd?: string): Promise<{ ok: boolean; ref?: string; error?: string }> {
+  const api = getAPI();
+  if (!api?.git) return { ok: false, error: 'Not in Electron' };
+  return api.git.stashRef(cwd);
 }

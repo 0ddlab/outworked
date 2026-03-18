@@ -83,6 +83,7 @@ export class OfficeScene extends Phaser.Scene {
   private deskPositions: { x: number; y: number }[] = []; // tile positions of desk chairs
   /** Snapshot of last-rendered agent state, keyed by id */
   private agentSnapshot: Map<string, { status: string; name: string; role: string; color: string; thought: string }> = new Map();
+  private resizeTimer?: ReturnType<typeof setTimeout>;
 
   constructor() {
     super({ key: 'OfficeScene' });
@@ -102,20 +103,33 @@ export class OfficeScene extends Phaser.Scene {
     this.ready = true;
 
     this.scale.on('resize', () => {
-      this.computeGrid();
-      if (this.officeGraphics) {
-        this.officeGraphics.destroy();
-      }
-      this.drawOffice();
-      if (this.agents.length > 0) {
-        this.fullRebuildAgents();
-      }
+      // Debounce resize to avoid crashes from rapid successive rebuilds
+      if (this.resizeTimer) clearTimeout(this.resizeTimer);
+      this.resizeTimer = setTimeout(() => {
+        if (!this.scene.isActive() || !this.sys.game) return;
+        this.computeGrid();
+        if (this.officeGraphics) {
+          this.officeGraphics.destroy();
+        }
+        this.drawOffice();
+        if (this.agents.length > 0) {
+          this.fullRebuildAgents();
+        }
+      }, 150);
     });
 
     // Render any agents that were set before create() fired
     if (this.agents.length > 0) {
       this.fullRebuildAgents();
     }
+
+    // Clean up debounce timer on scene shutdown
+    this.events.on('shutdown', () => {
+      if (this.resizeTimer) {
+        clearTimeout(this.resizeTimer);
+        this.resizeTimer = undefined;
+      }
+    });
   }
 
   updateAgents(agents: Agent[]) {

@@ -5,6 +5,7 @@ import { executeTask, generateTodoList, routeTasks } from '../lib/orchestrator';
 import { createAgent, createClaudeAgentFile } from '../lib/storage';
 import { sendClaudeCodeInput, PermissionRequest } from '../lib/terminal';
 import { createSession, saveSession, loadSession, listSessions, deleteSession, searchSessions } from '../lib/sessions';
+import MarkdownMessage from './MarkdownMessage';
 
 export interface OrchestrationDoneEvent {
   success: number;
@@ -33,6 +34,7 @@ export default function ChatWindow({ agent, agents, skills, onUpdateAgent, onAdd
   const [pendingPermission, setPendingPermission] = useState<PermissionRequest | null>(null);
   const [debugLog, setDebugLog] = useState<string[]>([]);
   const [showDebug, setShowDebug] = useState(false);
+  const [toolCalls, setToolCalls] = useState<{ name: string; args: string; timestamp: number }[]>([]);
   const [showHistory, setShowHistory] = useState(false);
   const [sessionList, setSessionList] = useState<SessionMeta[]>([]);
   const [sessionSearch, setSessionSearch] = useState('');
@@ -151,6 +153,7 @@ export default function ChatWindow({ agent, agents, skills, onUpdateAgent, onAdd
     setInput('');
     setIsStreaming(true);
     setStreamingText('');
+    setToolCalls([]);
 
     const userMsg: Message = { role: 'user', content: userText, timestamp: Date.now() };
 
@@ -472,6 +475,7 @@ export default function ChatWindow({ agent, agents, skills, onUpdateAgent, onAdd
               call.name === 'execute_code' ? 'Running code' :
               call.name === 'list_files' ? 'Listing files' :
               call.name;
+            setToolCalls(prev => [...prev, { name: call.name, args: toolLabel, timestamp: Date.now() }]);
             onUpdateAgent({
               ...agentState,
               status: 'working',
@@ -482,10 +486,12 @@ export default function ChatWindow({ agent, agents, skills, onUpdateAgent, onAdd
           // Claude Code stream events for subagent employees
           onClaudeCodeEvent: agentState.subagentDef ? (event) => {
             if (event.type === 'tool_use' && event.toolName) {
+              const label = `${event.toolName}${event.toolInput?.file_path ? ` ${event.toolInput.file_path}` : ''}`;
+              setToolCalls(prev => [...prev, { name: event.toolName!, args: label, timestamp: Date.now() }]);
               onUpdateAgent({
                 ...agentState,
                 status: 'working',
-                currentThought: `🔧 ${event.toolName}${event.toolInput?.file_path ? ` ${event.toolInput.file_path}` : ''}`,
+                currentThought: `🔧 ${label}`,
               });
             }
           } : undefined,
@@ -689,8 +695,8 @@ export default function ChatWindow({ agent, agents, skills, onUpdateAgent, onAdd
                       {allSucceeded ? '✅ Tasks Complete' : '⚠️ Tasks Finished'}
                     </span>
                   </div>
-                  <div className="px-3 py-2 text-[12px] font-mono leading-7 whitespace-pre-wrap break-words text-gray-100">
-                    {msg.content}
+                  <div className="px-3 py-2 text-[12px] leading-relaxed text-gray-100">
+                    <MarkdownMessage content={msg.content} />
                   </div>
                 </div>
               </div>
@@ -699,26 +705,42 @@ export default function ChatWindow({ agent, agents, skills, onUpdateAgent, onAdd
 
           return (
             <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-              <div
-                className={`max-w-[85%] px-2.5 py-1.5 rounded text-[12px] font-mono leading-7 whitespace-pre-wrap break-words ${
-                  msg.role === 'user'
-                    ? 'bg-indigo-600 text-white'
-                    : 'bg-slate-700 text-gray-100'
-                }`}
-              >
-                {msg.content}
-              </div>
+              {msg.role === 'user' ? (
+                <div className="max-w-[85%] px-2.5 py-1.5 rounded text-[12px] font-mono leading-7 whitespace-pre-wrap break-words bg-indigo-600 text-white">
+                  {msg.content}
+                </div>
+              ) : (
+                <div className="max-w-[85%] px-2.5 py-1.5 rounded text-[12px] leading-relaxed bg-slate-700 text-gray-100">
+                  <MarkdownMessage content={msg.content} />
+                </div>
+              )}
             </div>
           );
         })}
+        {isStreaming && toolCalls.length > 0 && (
+          <details className="mx-1">
+            <summary className="text-[10px] font-pixel text-slate-400 cursor-pointer hover:text-slate-300 flex items-center gap-1.5 py-0.5">
+              <span className="inline-block w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
+              {toolCalls.length} tool call{toolCalls.length !== 1 ? 's' : ''}
+            </summary>
+            <div className="ml-3 mt-1 space-y-0.5 border-l border-slate-700 pl-2">
+              {toolCalls.map((tc, i) => (
+                <div key={i} className="text-[10px] font-mono text-slate-500 flex items-center gap-1.5">
+                  <span className="text-amber-500/70">{'>'}</span>
+                  <span className="text-slate-400">{tc.args}</span>
+                </div>
+              ))}
+            </div>
+          </details>
+        )}
         {isStreaming && streamingText && (
           <div className="flex justify-start">
-            <div className={`max-w-[85%] px-2.5 py-1.5 rounded text-[12px] font-mono leading-7 whitespace-pre-wrap break-words ${
+            <div className={`max-w-[85%] px-2.5 py-1.5 rounded text-[12px] leading-relaxed ${
               streamingText.includes('completed successfully')
                 ? 'bg-emerald-950/30 border border-emerald-600/40 text-gray-100'
                 : 'bg-slate-700 text-gray-100'
             }`}>
-              {streamingText}
+              <MarkdownMessage content={streamingText} />
               {!streamingText.includes('completed successfully') && !streamingText.includes('tasks completed') && (
                 <span className="inline-block w-1.5 h-3 bg-gray-400 ml-0.5 animate-pulse align-middle" />
               )}
@@ -727,8 +749,13 @@ export default function ChatWindow({ agent, agents, skills, onUpdateAgent, onAdd
         )}
         {isStreaming && !streamingText && (
           <div className="flex justify-start">
-            <div className="px-2.5 py-1.5 rounded bg-slate-700">
-              <span className="text-[11px] font-mono text-slate-300 animate-pulse">thinking...</span>
+            <div className="px-2.5 py-1.5 rounded bg-slate-700 flex items-center gap-2">
+              <span className="flex gap-0.5">
+                <span className="w-1 h-1 rounded-full bg-slate-400 animate-bounce" style={{ animationDelay: '0ms' }} />
+                <span className="w-1 h-1 rounded-full bg-slate-400 animate-bounce" style={{ animationDelay: '150ms' }} />
+                <span className="w-1 h-1 rounded-full bg-slate-400 animate-bounce" style={{ animationDelay: '300ms' }} />
+              </span>
+              <span className="text-[11px] font-mono text-slate-400">thinking...</span>
             </div>
           </div>
         )}

@@ -133,4 +133,30 @@ contextBridge.exposeInMainWorld("electronAPI", {
     writeClaudeMd: (content) =>
       ipcRenderer.invoke("claude-settings:writeClaudeMd", content),
   },
+
+  // File watching
+  watcher: {
+    watchWorkspace: (dir) => ipcRenderer.send("fs:watchWorkspace", dir),
+    unwatchWorkspace: () => ipcRenderer.send("fs:unwatchWorkspace"),
+    onFileChanged: (cb) => {
+      const listener = (_event, data) => cb(data);
+      ipcRenderer.on("fs:fileChanged", listener);
+      return () => ipcRenderer.removeListener("fs:fileChanged", listener);
+    },
+    onFileTreeChanged: (cb) => {
+      const listener = () => cb();
+      ipcRenderer.on("fs:fileTreeChanged", listener);
+      return () => ipcRenderer.removeListener("fs:fileTreeChanged", listener);
+    },
+  },
+
+  // Git operations
+  git: {
+    status: (cwd) => ipcRenderer.invoke("git:status", cwd),
+    diff: (cwd, ref, filepath) =>
+      ipcRenderer.invoke("git:diff", cwd, ref, filepath),
+    diffStat: (cwd) => ipcRenderer.invoke("git:diffStat", cwd),
+    log: (cwd) => ipcRenderer.invoke("git:log", cwd),
+    stashRef: (cwd) => ipcRenderer.invoke("git:stashRef", cwd),
+  },
 });

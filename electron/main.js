@@ -1289,6 +1289,220 @@ function setupFilesystemIPC() {
   });
 }
 
+// ─── File Watcher IPC ─────────────────────────────────────────────
+
+/** Directories to ignore when watching for file-system changes. */
+const WATCH_SKIP_DIRS = new Set([
+  ".git",
+  "node_modules",
+  "dist",
+  "build",
+  ".next",
+  ".cache",
+  "__pycache__",
+  ".venv",
+  "venv",
+  ".turbo",
+]);
+
+/** Single active FSWatcher instance – only one workspace watched at a time. */
+let activeWatcher = null;
+
+/**
+ * Returns true if any path segment of `relPath` is in WATCH_SKIP_DIRS.
+ * @param {string} relPath - relative path returned by fs.watch filename arg
+ */
+function shouldSkipWatchPath(relPath) {
+  if (!relPath) return false;
+  const parts = relPath.split(path.sep);
+  return parts.some((p) => WATCH_SKIP_DIRS.has(p));
+}
+
+/**
+ * Register IPC handlers for workspace file watching.
+ * Channels:
+ *   fs:watchWorkspace   (_event, dir) → void
+ *   fs:unwatchWorkspace ()            → void
+ * Emitted to renderer:
+ *   fs:fileChanged      { eventType, filename }
+ *   fs:fileTreeChanged  (no payload)
+ */
+function setupFileWatcherIPC() {
+  // Start watching a workspace directory for file changes.
+  ipcMain.on("fs:watchWorkspace", (_event, dir) => {
+    // Close any existing watcher before starting a new one.
+    if (activeWatcher) {
+      try {
+        activeWatcher.close();
+      } catch {
+        /* ignore */
+      }
+      activeWatcher = null;
+    }
+
+    const watchDir = dir || workspaceDir;
+    if (!fs.existsSync(watchDir)) return;
+
+    // Debounce timers: keyed by filename for per-file debounce, and a single
+    // timer for the coarser "tree changed" notification.
+    const fileTimers = new Map();
+    let treeTimer = null;
+
+    try {
+      activeWatcher = fs.watch(
+        watchDir,
+        { recursive: true },
+        (eventType, filename) => {
+          if (!filename || shouldSkipWatchPath(filename)) return;
+
+          // Per-file debounce – 300 ms
+          if (fileTimers.has(filename)) {
+            clearTimeout(fileTimers.get(filename));
+          }
+          fileTimers.set(
+            filename,
+            setTimeout(() => {
+              fileTimers.delete(filename);
+              if (mainWindow && !mainWindow.isDestroyed()) {
+                mainWindow.webContents.send("fs:fileChanged", {
+                  eventType,
+                  filename,
+                });
+              }
+            }, 300),
+          );
+
+          // Coarser tree-changed notification – 500 ms
+          if (treeTimer) clearTimeout(treeTimer);
+          treeTimer = setTimeout(() => {
+            treeTimer = null;
+            if (mainWindow && !mainWindow.isDestroyed()) {
+              mainWindow.webContents.send("fs:fileTreeChanged");
+            }
+          }, 500);
+        },
+      );
+
+      activeWatcher.on("error", (err) => {
+        console.error("[fs:watchWorkspace] watcher error:", err.message);
+      });
+    } catch (err) {
+      console.error("[fs:watchWorkspace] failed to start watcher:", err.message);
+    }
+  });
+
+  // Stop watching the current workspace.
+  ipcMain.on("fs:unwatchWorkspace", () => {
+    if (activeWatcher) {
+      try {
+        activeWatcher.close();
+      } catch {
+        /* ignore */
+      }
+      activeWatcher = null;
+    }
+  });
+}
+
+// ─── Git IPC ──────────────────────────────────────────────────────
+
+/**
+ * Register IPC handlers for git operations in the workspace.
+ * All handlers accept an optional `dir` as their first argument (after
+ * _event) and fall back to `workspaceDir` when omitted.
+ *
+ * Channels:
+ *   git:status    (_event, dir)                → { ok, files[] }
+ *   git:diff      (_event, dir, ref?, filepath?) → { ok, diff }
+ *   git:diffStat  (_event, dir)                → { ok, stat }
+ *   git:log       (_event, dir)                → { ok, log }
+ *   git:stashRef  (_event, dir)                → { ok, ref }
+ */
+function setupGitIPC() {
+  const EXEC_OPTS = { encoding: "utf-8", timeout: 10000 };
+
+  /**
+   * Run a git command in `cwd`, returning stdout as a trimmed string.
+   * Throws on non-zero exit (execSync behaviour).
+   * @param {string} cmd
+   * @param {string} cwd
+   */
+  function git(cmd, cwd) {
+    return execSync(cmd, { ...EXEC_OPTS, cwd }).trimEnd();
+  }
+
+  // Parse `git status --porcelain` output into a structured array.
+  ipcMain.handle("git:status", (_event, dir) => {
+    const cwd = dir || workspaceDir;
+    try {
+      const raw = git("git status --porcelain", cwd);
+      const files = raw
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => ({
+          status: line.slice(0, 2).trim(),
+          path: line.slice(3),
+        }));
+      return { ok: true, files };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+
+  // Return unified diff, optionally scoped to a ref and/or a single file.
+  ipcMain.handle("git:diff", (_event, dir, ref, filepath) => {
+    const cwd = dir || workspaceDir;
+    try {
+      let cmd = "git diff";
+      if (ref) cmd += ` ${ref}`;
+      if (filepath) cmd += ` -- ${filepath}`;
+      const diff = git(cmd, cwd);
+      return { ok: true, diff };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+
+  // Return a short diffstat summary.
+  ipcMain.handle("git:diffStat", (_event, dir) => {
+    const cwd = dir || workspaceDir;
+    try {
+      const stat = git("git diff --stat", cwd);
+      return { ok: true, stat };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+
+  // Return the most recent 20 commits in oneline format.
+  ipcMain.handle("git:log", (_event, dir) => {
+    const cwd = dir || workspaceDir;
+    try {
+      const log = git("git log --oneline -20", cwd);
+      return { ok: true, log };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+
+  // Create a stash ref (without actually stashing) for session-start baseline.
+  // Uses `git stash create` which returns a commit hash if there are staged/
+  // unstaged changes, or an empty string when the tree is clean.  In the
+  // clean-tree case we fall back to HEAD.
+  ipcMain.handle("git:stashRef", (_event, dir) => {
+    const cwd = dir || workspaceDir;
+    try {
+      const ref = git("git stash create", cwd);
+      if (ref) return { ok: true, ref };
+      // No local changes – use HEAD as the baseline.
+      const head = git("git rev-parse HEAD", cwd);
+      return { ok: true, ref: head };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+}
+
 // ─── Music IPC ────────────────────────────────────────────────────
 function getMusicDir() {
   return path.join(__dirname, "..", "dist-renderer", "music");
@@ -1743,6 +1957,8 @@ app.whenReady().then(() => {
 
   setupShellIPC();
   setupFilesystemIPC();
+  setupFileWatcherIPC();
+  setupGitIPC();
   setupPermissionsIPC();
   setupMusicIPC();
   setupSessionIPC();
@@ -1757,6 +1973,14 @@ app.whenReady().then(() => {
 });
 
 app.on("window-all-closed", () => {
+  if (activeWatcher) {
+    try {
+      activeWatcher.close();
+    } catch {
+      /* ignore */
+    }
+    activeWatcher = null;
+  }
   app.quit();
 });
 
