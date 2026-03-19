@@ -24,18 +24,19 @@ Outworked turns AI agents into office employees you can see, click on, and manag
 - **Desktop Notifications** — Get notified when tasks finish or agents need approval
 - **8-Bit Sound Effects** — Because every office needs a soundtrack
 
-## Prerequisites
+## Install
 
-- [Node.js](https://nodejs.org/) (v18+)
+The easiest way to get started is to download the latest `.dmg` from [GitHub Releases](https://github.com/outworked/outworked/releases) and drag Outworked into your Applications folder.
+
+### Prerequisites
+
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed and authenticated
 
-## Quick Start
+### From Source
 
 ```bash
-# Install dependencies
+# Requires Node.js v18+
 npm install
-
-# Run in development mode
 npm run electron:dev
 ```
 
