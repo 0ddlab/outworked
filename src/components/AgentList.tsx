@@ -1,11 +1,12 @@
 import { useState, useEffect, useRef } from 'react';
-import { Agent } from '../lib/types';
+import { Agent, BackgroundTask } from '../lib/types';
 
 interface AgentListProps {
   agents: Agent[];
   selectedAgentId: string | null;
   onSelect: (agent: Agent) => void;
   onAdd: () => void;
+  backgroundTasks?: BackgroundTask[];
 }
 
 const STATUS_COLORS: Record<string, string> = {
@@ -17,6 +18,7 @@ const STATUS_COLORS: Record<string, string> = {
   'waiting-approval': '#eab308',
   stuck: '#ef4444',
   collaborating: '#8b5cf6',
+  background: '#6366f1',
 };
 
 const STATUS_LABELS: Record<string, string> = {
@@ -28,9 +30,10 @@ const STATUS_LABELS: Record<string, string> = {
   'waiting-input': '⏸ Needs input',
   'waiting-approval': '🔒 Needs approval',
   stuck: '⚠ Stuck',
+  background: '🔄 Background',
 };
 
-export default function AgentList({ agents, selectedAgentId, onSelect, onAdd }: AgentListProps) {
+export default function AgentList({ agents, selectedAgentId, onSelect, onAdd, backgroundTasks = [] }: AgentListProps) {
   const [now, setNow] = useState(Date.now());
   const statusStartRef = useRef<Record<string, number>>({});
 
@@ -84,6 +87,7 @@ export default function AgentList({ agents, selectedAgentId, onSelect, onAdd }: 
             <div className="flex-1 min-w-0">
               <p className="text-[12px] font-pixel text-white truncate">
                 {agent.name}
+                {agent.autoCreated && <span className="text-[8px] text-emerald-400 ml-1 border border-emerald-500/40 rounded px-0.5" title="Auto-created by Boss">AUTO</span>}
                 {agent.subagentFile && <span className="text-[9px] text-purple-400 ml-1">⚡</span>}
                 {agent.agentScope === 'project' && <span className="text-[8px] text-cyan-400 ml-1" title="Project agent">PRJ</span>}
                 {agent.agentScope === 'user' && agent.subagentFile && <span className="text-[8px] text-amber-400 ml-1" title="User agent">USR</span>}
@@ -92,6 +96,11 @@ export default function AgentList({ agents, selectedAgentId, onSelect, onAdd }: 
             </div>
             {/* Status dot + label for attention states */}
             <div className="flex items-center gap-1 shrink-0">
+              {agent.status === 'background' && (
+                <span className="text-[8px] font-pixel leading-none px-1 py-0.5 rounded bg-indigo-900/60 text-indigo-300 animate-pulse">
+                  🔄 BG
+                </span>
+              )}
               {(agent.status === 'waiting-input' || agent.status === 'waiting-approval' || agent.status === 'stuck') && (
                 <span
                   className={`text-[8px] font-pixel leading-none px-1 py-0.5 rounded ${agent.status === 'stuck' ? 'bg-red-900/60 text-red-300 animate-pulse' : 'bg-amber-900/60 text-amber-300 animate-pulse'}`}
@@ -99,7 +108,7 @@ export default function AgentList({ agents, selectedAgentId, onSelect, onAdd }: 
                   {STATUS_LABELS[agent.status]}
                 </span>
               )}
-              {(agent.status === 'thinking' || agent.status === 'working' || agent.status === 'speaking' || agent.status === 'collaborating') && statusStartRef.current[agent.id] && (
+              {(agent.status === 'thinking' || agent.status === 'working' || agent.status === 'speaking' || agent.status === 'collaborating' || agent.status === 'background') && statusStartRef.current[agent.id] && (
                 <span className="text-[9px] font-mono text-slate-500">
                   {(() => {
                     const secs = Math.floor((now - statusStartRef.current[agent.id]) / 1000);

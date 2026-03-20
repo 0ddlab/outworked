@@ -403,7 +403,9 @@ export async function runClaudeCodeAdvanced(
                 resultErrors = event.errors;
               }
               sessionId = event.session_id;
-              cost = event.total_cost_usd;
+              // Support both old (total_cost_usd) and new (cost_usd) field names
+              const ev = event as unknown as Record<string, unknown>;
+              cost = (ev.total_cost_usd ?? ev.cost_usd ?? ev.costUsd) as number | undefined;
               if (event.usage) {
                 usage = {
                   input_tokens: event.usage.input_tokens || 0,
@@ -413,11 +415,11 @@ export async function runClaudeCodeAdvanced(
 
             // Handle permission request — Claude Code is asking the user to approve a tool
             } else if (event.type === 'permission_request') {
-              const toolName = (event as Record<string, unknown>).tool_name as string
-                || ((event as Record<string, unknown>).tool as Record<string, unknown>)?.name as string
+              const toolName = (event as unknown as Record<string, unknown>).tool_name as string
+                || ((event as unknown as Record<string, unknown>).tool as Record<string, unknown>)?.name as string
                 || 'unknown';
-              const desc = (event as Record<string, unknown>).description as string
-                || (event as Record<string, unknown>).message as string
+              const desc = (event as unknown as Record<string, unknown>).description as string
+                || (event as unknown as Record<string, unknown>).message as string
                 || `Claude wants to use ${toolName}`;
               callbacks.onPermissionRequest?.({
                 reqId,
@@ -457,7 +459,14 @@ export async function runClaudeCodeAdvanced(
             if (event.result) fullText = event.result;
             if (event.is_error && event.errors?.length) resultErrors = event.errors;
             sessionId = event.session_id;
-            cost = event.total_cost_usd;
+            const ev = event as unknown as Record<string, unknown>;
+            cost = (ev.total_cost_usd ?? ev.cost_usd ?? ev.costUsd) as number | undefined;
+            if (event.usage) {
+              usage = {
+                input_tokens: event.usage.input_tokens || 0,
+                output_tokens: event.usage.output_tokens || 0,
+              };
+            }
           }
         } catch {
           fullText += buffer;

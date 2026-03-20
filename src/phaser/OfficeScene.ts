@@ -830,6 +830,7 @@ export class OfficeScene extends Phaser.Scene {
       case 'working': return 'type';
       case 'speaking': return 'type';
       case 'collaborating': return 'walk';
+      case 'background': return 'type';
       default: return 'idle';
     }
   }
@@ -879,7 +880,7 @@ export class OfficeScene extends Phaser.Scene {
     container.add(nameText);
 
     // Role text
-    const roleText = this.add.text(0, 35, agent.role, {
+    const roleText = this.add.text(0, 35, agent.role.slice(0, 30), {
       fontSize: '7px',
       fontFamily: '"SF Pro", "Segoe UI", system-ui, sans-serif',
       color: '#ffffff',

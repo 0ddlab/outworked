@@ -1,5 +1,5 @@
 import { Agent, AgentSkill, AgentTodo, ApiKeys, Message, SubagentDef } from './types';
-import { sendMessage } from './ai';
+import { sendMessage, sendMessageWithCost } from './ai';
 import { listFiles, listAllFiles, readFile, writeFile, searchFiles } from './filesystem';
 import { runClaudeCodeAdvanced, ClaudeCodeAdvancedOptions, ClaudeCodeStreamCallbacks } from './terminal';
 import { getWorkspace } from './filesystem';
@@ -14,6 +14,7 @@ export interface TaskAssignment {
   agentId: string;
   agentName: string;
   task: string;
+  group?: number; // tasks in same group run in parallel; groups execute sequentially (1, then 2, etc.)
 }
 
 export interface OrchestrationResult {
@@ -21,6 +22,9 @@ export interface OrchestrationResult {
   plan: string;
   newAgents: NewAgentSpec[];
   workingDirectory: string;
+  cost?: number;
+  inputTokens?: number;
+  outputTokens?: number;
 }
 
 // If one of the existing directories matches the prompt (e.g. same project name or topic), reuse it as the workingDirectory. 
@@ -49,7 +53,7 @@ RESPOND in this exact JSON format and nothing else:
     { "name": "UniqueFirstName", "role": "Job Title", "personality": "Detailed system prompt for this specialist" }
   ],
   "assignments": [
-    { "agentName": "ExactEmployeeName", "task": "Specific task description for this employee" }
+    { "agentName": "ExactEmployeeName", "task": "Specific task description for this employee", "group": 1 }
   ]
 }
 
@@ -62,7 +66,16 @@ Rules:
 - Each assignment should be a clear, actionable task
 - You may assign multiple tasks to one employee or spread across employees
 - All employees share the same project working directory — coordinate their work so they don't overwrite each other
-- The workingDirectory should be reused if an existing directory is relevant, or a new short slug if not`;
+- The workingDirectory should be reused if an existing directory is relevant, or a new short slug if not
+
+PARALLEL EXECUTION — "group" field:
+- Each assignment MUST have a "group" number (integer starting at 1)
+- Tasks with the SAME group number run IN PARALLEL (simultaneously)
+- Groups execute in ascending order: all group 1 tasks finish before group 2 starts, etc.
+- If tasks are independent (e.g. frontend + backend, different files), put them in the SAME group
+- If task B depends on the output of task A, put A in a LOWER group number than B
+- If ALL tasks are independent, put them ALL in group 1
+- Maximize parallelism — only use sequential groups when there's a real dependency`;
 
 /**
  * Extract and parse a JSON object from an LLM reply that may contain
@@ -208,9 +221,12 @@ export async function routeTasks(
   const MAX_ROUTE_ATTEMPTS = 2;
   let lastErr: unknown;
   let lastRawReply = '';
+  let routerCost = 0;
+  let routerInputTokens = 0;
+  let routerOutputTokens = 0;
 
   for (let attempt = 0; attempt < MAX_ROUTE_ATTEMPTS; attempt++) {
-    const reply = await sendMessage(
+    const result = await sendMessageWithCost(
       routerAgent,
       attempt === 0
         ? prompt
@@ -220,6 +236,10 @@ export async function routeTasks(
       undefined,
       { useTools: false },
     );
+    const reply = result.text;
+    if (result.cost) routerCost = result.cost;
+    if (result.inputTokens) routerInputTokens = result.inputTokens;
+    if (result.outputTokens) routerOutputTokens = result.outputTokens;
     lastRawReply = reply;
 
     try {
@@ -235,7 +255,7 @@ export async function routeTasks(
       );
 
       const assignments: TaskAssignment[] = (parsed.assignments || []).map(
-        (a: { agentName: string; task: string }) => {
+        (a: { agentName: string; task: string; group?: number }) => {
           const agent = agents.find(
             (ag) => ag.name.toLowerCase() === a.agentName.toLowerCase()
           );
@@ -243,6 +263,7 @@ export async function routeTasks(
             agentId: agent?.id ?? '', // empty string means it's a new agent — resolved after creation
             agentName: a.agentName,
             task: a.task,
+            group: typeof a.group === 'number' ? a.group : 1,
           };
         }
       );
@@ -251,7 +272,7 @@ export async function routeTasks(
       const workDir = sanitizeSlug(parsed.workingDirectory || 'project');
       await ensureWorkingDirectory(workDir);
 
-      return { assignments, plan: parsed.plan || '', newAgents, workingDirectory: workDir };
+      return { assignments, plan: parsed.plan || '', newAgents, workingDirectory: workDir, cost: routerCost, inputTokens: routerInputTokens, outputTokens: routerOutputTokens };
     } catch (err) {
       lastErr = err;
       console.warn(`[orchestrator] Route attempt ${attempt + 1} failed:`, err, '\nRaw reply:', reply.slice(0, 500));
@@ -270,6 +291,9 @@ export async function routeTasks(
       : [],
     newAgents: [],
     workingDirectory: fallbackDir,
+    cost: routerCost,
+    inputTokens: routerInputTokens,
+    outputTokens: routerOutputTokens,
   };
 }
 
@@ -368,7 +392,7 @@ export async function executeTask(
   workingDirectory?: string,
   customToolExecutor?: (name: string, args: Record<string, unknown>) => Promise<string | null>,
   colleagues?: { name: string; role: string }[],
-): Promise<{ agent: Agent; reply: string }> {
+): Promise<{ agent: Agent; reply: string; cost?: number; inputTokens?: number; outputTokens?: number }> {
   // Build a strong system-level directive so agents respect the working directory
   const extraSystemPrompt = workingDirectory
     ? `\n\n## IMPORTANT — Project Directory\nThis project's root is "${workingDirectory}/". You MUST:\n- Prefix EVERY file path with "${workingDirectory}/" (e.g. "${workingDirectory}/src/index.js", NOT "src/index.js")\n- Pass cwd: "${workingDirectory}" to every run_command call\n- NEVER write files to paths outside "${workingDirectory}/"\nViolating this will break the project structure.`
@@ -387,7 +411,7 @@ export async function executeTask(
     currentThought: 'Working on task...',
   };
 
-  const reply = await sendMessage(
+  const result = await sendMessageWithCost(
     updatedAgent,
     userMsg.content,
     keys,
@@ -398,7 +422,7 @@ export async function executeTask(
 
   const assistantMsg: Message = {
     role: 'assistant',
-    content: reply,
+    content: result.text,
     timestamp: Date.now(),
   };
 
@@ -407,9 +431,12 @@ export async function executeTask(
       ...updatedAgent,
       history: [...updatedAgent.history, assistantMsg],
       status: 'idle',
-      currentThought: reply.slice(0, 80) + (reply.length > 80 ? '...' : ''),
+      currentThought: result.text.slice(0, 80) + (result.text.length > 80 ? '...' : ''),
     },
-    reply,
+    reply: result.text,
+    cost: result.cost,
+    inputTokens: result.inputTokens,
+    outputTokens: result.outputTokens,
   };
 }
 
@@ -479,7 +506,7 @@ export async function routeTasksViaClaudeCode(
   onDebug?: (line: string) => void,
   sessionId?: string,
   enableAgentTeams?: boolean,
-): Promise<{ text: string; sessionId?: string }> {
+): Promise<{ text: string; sessionId?: string; cost?: number; inputTokens?: number; outputTokens?: number }> {
   const workspace = await getWorkspace();
 
   // Build subagent definitions from all subagent-backed employees
@@ -606,7 +633,7 @@ ${hasTeam ? `- Delegate ALL work. NEVER write code, edit files, or run commands 
 
   try {
     const result = await runClaudeCodeAdvanced(options, streamCallbacks, signal);
-    return { text: result.result || fullText, sessionId: result.sessionId };
+    return { text: result.result || fullText, sessionId: result.sessionId, cost: result.cost, inputTokens: result.usage?.input_tokens, outputTokens: result.usage?.output_tokens };
   } catch (err) {
     // If resume failed because the session no longer exists, retry as a fresh session
     const msg = (err as Error)?.message || '';
@@ -621,7 +648,7 @@ ${hasTeam ? `- Delegate ALL work. NEVER write code, edit files, or run commands 
         resumeSessionId: undefined,
       };
       const result = await runClaudeCodeAdvanced(freshOptions, streamCallbacks, signal);
-      return { text: result.result || fullText, sessionId: result.sessionId };
+      return { text: result.result || fullText, sessionId: result.sessionId, cost: result.cost, inputTokens: result.usage?.input_tokens, outputTokens: result.usage?.output_tokens };
     }
     throw err;
   } finally {

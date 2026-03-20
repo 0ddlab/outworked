@@ -1,7 +1,7 @@
 import { Agent, AgentSkill, ApiKeys, Message, ToolCall } from './types';
 import { AGENT_TOOLS, ToolDefinition, executeTool } from './tools';
 import { getWorkspace } from './filesystem';
-import { runClaudeCode, runClaudeCodeAdvanced, ClaudeCodeAdvancedOptions, ClaudeCodeStreamCallbacks, PermissionRequest } from './terminal';
+import { runClaudeCodeAdvanced, ClaudeCodeAdvancedOptions, ClaudeCodeStreamCallbacks, PermissionRequest } from './terminal';
 import { getBundledSkill } from './bundled-skills';
 
 function buildToolPreamble(workspace: string): string {
@@ -136,9 +136,8 @@ function toolLabel(name: string, args: Record<string, unknown>): string {
 
 // ─── Claude Code CLI ──────────────────────────────────────────────
 // Uses the locally-installed `claude` CLI.
-// For subagent-backed agents, uses runClaudeCodeAdvanced with stream-json
-// for full event visibility (tool calls, subagent activity, session metadata).
-// For regular claude-code agents, falls back to the simpler runClaudeCode.
+// Uses runClaudeCodeAdvanced with stream-json for full event visibility
+// (tool calls, subagent activity, session metadata, cost tracking).
 
 async function callClaudeCode(
   system: string,
@@ -171,32 +170,8 @@ async function callClaudeCode(
 
   const workspace = await getWorkspace();
 
-  // Use advanced mode for subagent-backed agents (or any who have subagentDef)
-  if (agent?.subagentDef) {
-    return callClaudeCodeAdvanced(prompt, system, workspace, onThought, signal, agent, onClaudeCodeEvent, onPermissionRequest, onStderr);
-  }
-
-  // Fallback: simple mode for regular claude-code agents
-  let fullText = '';
-  onThought('🤖 Claude Code is thinking...');
-
-  const output = await runClaudeCode(
-    prompt,
-    system,
-    workspace,
-    (chunk) => {
-      fullText += chunk;
-      onThought(fullText);
-    },
-    signal,
-  );
-
-  if (!fullText) {
-    fullText = output;
-    onThought(fullText);
-  }
-
-  return { text: fullText };
+  // Always use advanced mode so we get cost/usage data back
+  return callClaudeCodeAdvanced(prompt, system, workspace, onThought, signal, agent, onClaudeCodeEvent, onPermissionRequest, onStderr);
 }
 
 /**

@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback, useRef, lazy, Suspense } from 'react';
-import { Agent, AgentSkill, AgentStatus, SubagentDef } from './lib/types';
+import { Agent, AgentSkill, AgentStatus, BackgroundTask, SubagentDef } from './lib/types';
 import { loadAgents, saveAgents, loadSkills, saveSkills, createAgent, createClaudeAgentFile, generateAgentWithAI, resetProject, syncClaudeSubagents, upgradeAgentsToClaudeCode, parseSubagentFrontmatter } from './lib/storage';
 import { migrateHistoryToSession, loadSession } from './lib/sessions';
 import { getClaudeCodeAuthStatus, isElectron, onClaudeAgentsChanged, watchProjectAgents, readClaudeSettings, deleteClaudeAgentFile } from './lib/terminal';
@@ -49,6 +49,7 @@ export default function App() {
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [latestToast, setLatestToast] = useState<AppNotification | null>(null);
   const [showOnboarding, setShowOnboarding] = useState(() => !localStorage.getItem('outworked_onboarding_done'));
+  const [backgroundTasks, setBackgroundTasks] = useState<BackgroundTask[]>([]);
 
   useEffect(() => {
     async function init() {
@@ -341,6 +342,49 @@ export default function App() {
     );
   }, [pushNotification]);
 
+  const handleStartBackgroundTask = useCallback((task: BackgroundTask, execute: () => Promise<{ reply: string; agent: Agent }>) => {
+    // Add to background task list
+    setBackgroundTasks(prev => [...prev, task]);
+
+    // Run the task — don't await, it runs in the background
+    execute().then(({ agent: finalAgent }) => {
+      // Update agent with results
+      updateAgent(finalAgent);
+      // Mark task as done
+      setBackgroundTasks(prev => prev.map(t =>
+        t.id === task.id ? { ...t, status: 'done' as const, completedAt: Date.now(), result: finalAgent.currentThought } : t
+      ));
+      // Notification
+      pushNotification({
+        type: 'task-complete',
+        title: `${task.agentName} finished background task`,
+        body: task.prompt.slice(0, 80),
+        agentName: task.agentName,
+        agentColor: agents.find(a => a.id === task.agentId)?.color,
+      });
+      if (getSoundsEnabled()) playTaskComplete();
+      showDesktopNotification(`${task.agentName} finished`, task.prompt.slice(0, 80));
+    }).catch((err) => {
+      const errorMsg = err instanceof Error ? err.message : 'Unknown error';
+      // Update agent to idle on error
+      const agentNow = agents.find(a => a.id === task.agentId);
+      if (agentNow) {
+        updateAgent({ ...agentNow, status: 'idle', currentThought: '' });
+      }
+      // Mark task as error
+      setBackgroundTasks(prev => prev.map(t =>
+        t.id === task.id ? { ...t, status: 'error' as const, completedAt: Date.now(), error: errorMsg } : t
+      ));
+      pushNotification({
+        type: 'agent-stuck',
+        title: `${task.agentName} background task failed`,
+        body: errorMsg,
+        agentName: task.agentName,
+        agentColor: agents.find(a => a.id === task.agentId)?.color,
+      });
+    });
+  }, [agents, updateAgent, pushNotification]);
+
   const handlePermissionNotification = useCallback((agentName: string, request: PermissionRequest) => {
     pushNotification({
       type: 'approval',
@@ -415,6 +459,7 @@ export default function App() {
             selectedAgentId={selectedAgentId}
             onSelect={handleAgentClick}
             onAdd={handleAddAgent}
+            backgroundTasks={backgroundTasks}
           />
           <SkillsPanel skills={skills} onUpdate={handleUpdateSkills} />
         </div>
@@ -555,10 +600,11 @@ export default function App() {
                 {agents.filter((a) => a.status !== 'idle' && a.status !== 'stuck' && a.status !== 'waiting-input' && a.status !== 'waiting-approval').map((a) => (
                   <button key={a.id} onClick={() => handleAgentClick(a)} className="flex items-center gap-1.5 shrink-0 group hover:bg-slate-800/50 rounded px-1.5 py-0.5 transition-colors">
                     <span className="relative flex h-2 w-2">
-                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full opacity-75" style={{ backgroundColor: a.color }} />
-                      <span className="relative inline-flex rounded-full h-2 w-2" style={{ backgroundColor: a.color }} />
+                      <span className={`${a.status === 'background' ? '' : 'animate-ping'} absolute inline-flex h-full w-full rounded-full opacity-75`} style={{ backgroundColor: a.status === 'background' ? '#6366f1' : a.color }} />
+                      <span className="relative inline-flex rounded-full h-2 w-2" style={{ backgroundColor: a.status === 'background' ? '#6366f1' : a.color }} />
                     </span>
                     <span className="text-[10px] font-pixel text-slate-300">
+                      {a.status === 'background' && <span className="text-indigo-400 mr-1">[BG]</span>}
                       <span style={{ color: a.color }}>{a.name}</span>
                       {a.currentThought && (
                         <>
@@ -628,6 +674,8 @@ export default function App() {
                 onOrchestrationDone={handleOrchestrationDone}
                 onPermissionNotification={handlePermissionNotification}
                 debugMode={debugMode}
+                backgroundTasks={backgroundTasks}
+                onStartBackgroundTask={handleStartBackgroundTask}
               />
             ) : rightPanel === 'editor' && selectedAgent ? (
               <AgentEditor

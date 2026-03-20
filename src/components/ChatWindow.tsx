@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { Agent, AgentSkill, AgentStatus, AgentTodo, Message, MODELS, SessionMeta, ToolCall } from '../lib/types';
+import { Agent, AgentSkill, AgentStatus, AgentTodo, BackgroundTask, Message, MODELS, SessionMeta, ToolCall } from '../lib/types';
 import { sendMessage, sendMessageWithCost } from '../lib/ai';
 import { addCumulativeCost } from '../lib/costs';
 import { executeTask, generateTodoList, routeTasks } from '../lib/orchestrator';
@@ -26,6 +26,8 @@ interface ChatWindowProps {
   onOrchestrationDone?: (event: OrchestrationDoneEvent) => void;
   onPermissionNotification?: (agentName: string, request: PermissionRequest) => void;
   debugMode: boolean;
+  backgroundTasks: BackgroundTask[];
+  onStartBackgroundTask: (task: BackgroundTask, execute: () => Promise<{ reply: string; agent: Agent }>) => void;
 }
 
 const EMPTY_KEYS = { openai: '', anthropic: '', gemini: '', github: '' };
@@ -39,6 +41,7 @@ const STATUS_COLORS: Record<string, string> = {
   'waiting-approval': '#eab308',
   stuck: '#ef4444',
   collaborating: '#8b5cf6',
+  background: '#6366f1',
 };
 
 const STATUS_LABELS: Record<string, string> = {
@@ -50,6 +53,7 @@ const STATUS_LABELS: Record<string, string> = {
   'waiting-input': 'Needs input',
   'waiting-approval': 'Needs approval',
   stuck: 'Stuck',
+  background: 'Running in background',
 };
 
 function formatElapsed(secs: number): string {
@@ -59,7 +63,7 @@ function formatElapsed(secs: number): string {
   return `${m}m ${s}s`;
 }
 
-export default function ChatWindow({ agent, agents, skills, onUpdateAgent, onAddAgent, agentTeamsEnabled, onOrchestrationDone, onPermissionNotification, debugMode }: ChatWindowProps) {
+export default function ChatWindow({ agent, agents, skills, onUpdateAgent, onAddAgent, agentTeamsEnabled, onOrchestrationDone, onPermissionNotification, debugMode, backgroundTasks, onStartBackgroundTask }: ChatWindowProps) {
   const [input, setInput] = useState('');
   const [isStreaming, setIsStreaming] = useState(false);
   const [streamingText, setStreamingText] = useState('');
@@ -87,12 +91,20 @@ export default function ChatWindow({ agent, agents, skills, onUpdateAgent, onAdd
     if (debugMode) setShowDebug(true);
   }, [debugMode]);
 
-  // Elapsed timer — ticks every second while streaming
+  // Elapsed timer — ticks every second while streaming or background task is running
+  const hasRunningBgTask = agent ? backgroundTasks.some(t => t.agentId === agent.id && t.status === 'running') : false;
   useEffect(() => {
-    if (!workStartedAt) { setElapsed(0); return; }
-    const interval = setInterval(() => setElapsed(Math.floor((Date.now() - workStartedAt) / 1000)), 1000);
+    if (!workStartedAt && !hasRunningBgTask) { setElapsed(0); return; }
+    const interval = setInterval(() => {
+      if (workStartedAt) {
+        setElapsed(Math.floor((Date.now() - workStartedAt) / 1000));
+      } else {
+        // Force re-render for background task timer
+        setElapsed(prev => prev + 1);
+      }
+    }, 1000);
     return () => clearInterval(interval);
-  }, [workStartedAt]);
+  }, [workStartedAt, hasRunningBgTask]);
 
   // Load session list when history panel opens or agent changes
   const refreshSessionList = useCallback(async () => {
@@ -375,6 +387,11 @@ export default function ChatWindow({ agent, agents, skills, onUpdateAgent, onAdd
       const routerModel = { model: bossAgent.model, provider: bossAgent.provider };
       const result = await routeTasks(userText, employees, EMPTY_KEYS, routerModel);
 
+      // Track boss planning cost
+      if (result.cost && result.cost > 0) {
+        addCumulativeCost(bossAgent.id, bossAgent.name, result.cost, result.inputTokens || 0, result.outputTokens || 0, bossAgent.id);
+      }
+
       if (debugMode) addDebug(`[boss] Plan: ${result.plan}, ${result.assignments.length} assignments, ${result.newAgents.length} new agents`);
 
       // ── Step 2: Create new agents if needed ──
@@ -388,6 +405,7 @@ export default function ChatWindow({ agent, agents, skills, onUpdateAgent, onAdd
           role: spec.role,
           personality: spec.personality,
           position: { x: Math.floor(Math.random() * 10) + 2, y: Math.floor(Math.random() * 6) + 2 },
+          autoCreated: true,
         }, true);
         newAgents.push(newAgent);
         onAddAgent(newAgent);
@@ -425,130 +443,181 @@ export default function ChatWindow({ agent, agents, skills, onUpdateAgent, onAdd
       });
 
       // ── Show plan ──
+      const maxGroup = Math.max(...assignments.map(a => a.group ?? 1));
+      const hasParallel = assignments.some((a, _, arr) => arr.filter(b => (b.group ?? 1) === (a.group ?? 1)).length > 1);
       let progress = `📝 **Plan:** ${result.plan}\n`;
       if (newAgents.length > 0) {
         progress += `👥 **New hires:** ${newAgents.map(a => `${a.name} (${a.role})`).join(', ')}\n`;
       }
-      progress += `\n**Tasks:**\n${assignments.map(a => `- **${a.agentName}**: ${a.task}`).join('\n')}\n\n⏳ Executing tasks...\n`;
+      if (hasParallel) {
+        progress += `⚡ **Parallel execution enabled** — ${maxGroup} group${maxGroup > 1 ? 's' : ''}\n`;
+      }
+      progress += `\n**Tasks:**\n${assignments.map(a => `- ${hasParallel ? `[G${a.group ?? 1}] ` : ''}**${a.agentName}**: ${a.task}`).join('\n')}\n\n⏳ Executing tasks...\n`;
       setStreamingText(progress);
 
-      // ── Step 5: Execute tasks sequentially ──
+      // ── Step 5: Execute tasks — parallel within groups, sequential across groups ──
       const taskResults: { agentName: string; success: boolean; reply: string }[] = new Array(assignments.length);
 
+      // Group assignments by their parallel group number
+      const groupMap = new Map<number, { assignment: typeof assignments[0]; idx: number }[]>();
       for (let idx = 0; idx < assignments.length; idx++) {
-        const assignment = assignments[idx];
-        const emp = allEmployees.find(a => a.id === assignment.agentId);
-        if (!emp) {
-          taskResults[idx] = { agentName: assignment.agentName, success: false, reply: 'Agent not found' };
-          continue;
+        const g = assignments[idx].group ?? 1;
+        if (!groupMap.has(g)) groupMap.set(g, []);
+        groupMap.get(g)!.push({ assignment: assignments[idx], idx });
+      }
+      const sortedGroups = [...groupMap.keys()].sort((a, b) => a - b);
+
+      // Track results from previous group for context passing
+      let prevGroupResults: { agentName: string; reply: string }[] = [];
+
+      for (const groupNum of sortedGroups) {
+        const groupTasks = groupMap.get(groupNum)!;
+        const isParallel = groupTasks.length > 1;
+
+        if (isParallel) {
+          if (debugMode) addDebug(`[boss] ⚡ Group ${groupNum}: running ${groupTasks.length} tasks in PARALLEL`);
+          setStreamingText(s => s + `\n⚡ **Running ${groupTasks.length} tasks in parallel** (group ${groupNum})…\n`);
         }
 
-        // ── Collaboration handoff: show current agent consulting previous agent ──
-        if (idx > 0 && taskResults[idx - 1]?.success) {
-          const prevAssignment = assignments[idx - 1];
-          const prevEmp = allEmployees.find(a => a.id === prevAssignment.agentId);
-          if (prevEmp && prevEmp.id !== emp.id) {
-            await showCollaboration(
-              emp,
-              prevEmp,
-              `💬 Getting context from ${prevEmp.name}`,
-              2000,
-            );
+        // Execute a single agent's task (used both for parallel and sequential)
+        async function executeAgentTask(
+          assignment: typeof assignments[0],
+          idx: number,
+          prevContext?: string,
+        ): Promise<void> {
+          const emp = allEmployees.find(a => a.id === assignment.agentId);
+          if (!emp) {
+            taskResults[idx] = { agentName: assignment.agentName, success: false, reply: 'Agent not found' };
+            return;
           }
-        }
 
-        // Mark boss todo in-progress
-        bossTodos[idx] = { ...bossTodos[idx], status: 'in-progress' };
-        onUpdateAgent({
-          ...bossAgent,
-          todos: [...(bossAgent.todos || []).filter(t => !bossTodos.some(bt => bt.id === t.id)), ...bossTodos],
-        });
+          // Mark boss todo in-progress
+          bossTodos[idx] = { ...bossTodos[idx], status: 'in-progress' };
+          onUpdateAgent({
+            ...bossAgent,
+            todos: [...(bossAgent.todos || []).filter(t => !bossTodos.some(bt => bt.id === t.id)), ...bossTodos],
+          });
 
-        // Generate sub-task checklist for the employee
-        onUpdateAgent({ ...emp, status: 'working', currentThought: `Planning: ${assignment.task.slice(0, 60)}...` });
-        if (debugMode) addDebug(`[boss] Generating todo list for ${emp.name}: ${assignment.task.slice(0, 100)}`);
+          // Generate sub-task checklist for the employee
+          onUpdateAgent({ ...emp, status: 'working', currentThought: `Planning: ${assignment.task.slice(0, 60)}...` });
+          if (debugMode) addDebug(`[boss] Generating todo list for ${emp.name}: ${assignment.task.slice(0, 100)}`);
 
-        let empTodos: AgentTodo[] = [];
-        try {
-          empTodos = await generateTodoList(emp, assignment.task, EMPTY_KEYS, skills);
-        } catch {
-          // Fallback: single todo
-          empTodos = [{ id: crypto.randomUUID(), text: assignment.task, status: 'pending', timestamp: Date.now() }];
-        }
-
-        // Start with all todos as pending
-        let currentAgent: Agent = {
-          ...emp,
-          todos: [...(emp.todos ?? []), ...empTodos.map(t => ({ ...t, status: 'pending' as const }))],
-        };
-        onUpdateAgent({ ...currentAgent, status: 'working', currentThought: `Starting: ${assignment.task.slice(0, 60)}...` });
-
-        // Execute each sub-task one at a time
-        const replies: string[] = [];
-        let hadError = false;
-
-        for (let ti = 0; ti < empTodos.length; ti++) {
-          const todo = empTodos[ti];
-          if (debugMode) addDebug(`[boss] ${emp.name} step ${ti + 1}/${empTodos.length}: ${todo.text.slice(0, 80)}`);
-
-          // Mark this todo in-progress
-          currentAgent = {
-            ...currentAgent,
-            todos: currentAgent.todos.map(t => t.id === todo.id ? { ...t, status: 'in-progress' as const } : t),
-          };
-          onUpdateAgent({ ...currentAgent, status: 'working', currentThought: `[${ti + 1}/${empTodos.length}] ${todo.text.slice(0, 60)}` });
-
+          let empTodos: AgentTodo[] = [];
           try {
-            const context = ti > 0
-              ? `\n\nContext from previous steps:\n${replies.map((r, i) => `Step ${i + 1}: ${r.slice(0, 200)}`).join('\n')}`
-              : '';
-            const { agent: updatedAgent, reply } = await executeTask(
-              currentAgent,
-              `[Step ${ti + 1}/${empTodos.length}] ${todo.text}${context}`,
-              EMPTY_KEYS,
-              (partial) => onUpdateAgent({ ...currentAgent, status: 'working', currentThought: `[${ti + 1}/${empTodos.length}] ${partial.slice(0, 70)}` }),
-              abortRef.current?.signal, skills,
-              undefined, // workingDirectory
-              undefined, // customToolExecutor
-              allEmployees.filter(a => a.id !== currentAgent.id).map(a => ({ name: a.name, role: a.role })),
-            );
+            empTodos = await generateTodoList(emp, assignment.task, EMPTY_KEYS, skills);
+          } catch {
+            empTodos = [{ id: crypto.randomUUID(), text: assignment.task, status: 'pending', timestamp: Date.now() }];
+          }
 
-            // Check for collaboration requests in the reply
-            const collabContext = await handleCollaborationRequests(currentAgent, reply, allEmployees);
-            replies.push(reply + collabContext);
+          let currentAgent: Agent = {
+            ...emp,
+            todos: [...(emp.todos ?? []), ...empTodos.map(t => ({ ...t, status: 'pending' as const }))],
+          };
+          onUpdateAgent({ ...currentAgent, status: 'working', currentThought: `Starting: ${assignment.task.slice(0, 60)}...` });
 
-            // Mark this todo done, update agent with new history
-            currentAgent = {
-              ...updatedAgent,
-              todos: updatedAgent.todos.map(t => t.id === todo.id ? { ...t, status: 'done' as const } : t),
-            };
-            onUpdateAgent(currentAgent);
-          } catch (err) {
-            const errMsg = err instanceof Error ? err.message : 'Unknown error';
+          const replies: string[] = [];
+          let hadError = false;
+
+          for (let ti = 0; ti < empTodos.length; ti++) {
+            const todo = empTodos[ti];
+            if (debugMode) addDebug(`[boss] ${emp.name} step ${ti + 1}/${empTodos.length}: ${todo.text.slice(0, 80)}`);
+
             currentAgent = {
               ...currentAgent,
-              todos: currentAgent.todos.map(t => t.id === todo.id ? { ...t, status: 'error' as const, error: errMsg } : t),
+              todos: currentAgent.todos.map(t => t.id === todo.id ? { ...t, status: 'in-progress' as const } : t),
             };
-            onUpdateAgent({ ...currentAgent, status: 'idle', currentThought: '' });
-            replies.push(`Error: ${errMsg}`);
-            hadError = true;
-            if (debugMode) addDebug(`[boss] ${emp.name} step ${ti + 1} failed: ${errMsg}`);
-            break; // Stop remaining steps on error
+            onUpdateAgent({ ...currentAgent, status: 'working', currentThought: `[${ti + 1}/${empTodos.length}] ${todo.text.slice(0, 60)}` });
+
+            try {
+              let context = '';
+              if (ti > 0) {
+                context += `\n\nContext from previous steps:\n${replies.map((r, i) => `Step ${i + 1}: ${r.slice(0, 200)}`).join('\n')}`;
+              }
+              if (prevContext) {
+                context += `\n\nContext from previous group's work:\n${prevContext}`;
+              }
+              const { agent: updatedAgent, reply, cost, inputTokens, outputTokens } = await executeTask(
+                currentAgent,
+                `[Step ${ti + 1}/${empTodos.length}] ${todo.text}${context}`,
+                EMPTY_KEYS,
+                (partial) => onUpdateAgent({ ...currentAgent, status: 'working', currentThought: `[${ti + 1}/${empTodos.length}] ${partial.slice(0, 70)}` }),
+                abortRef.current?.signal, skills,
+                undefined,
+                undefined,
+                allEmployees.filter(a => a.id !== currentAgent.id).map(a => ({ name: a.name, role: a.role })),
+              );
+
+              // Track cost for boss-delegated tasks
+              if (cost !== undefined && cost > 0) {
+                addCumulativeCost(currentAgent.id, currentAgent.name, cost, inputTokens || 0, outputTokens || 0, currentAgent.id);
+              }
+
+              const collabContext = await handleCollaborationRequests(currentAgent, reply, allEmployees);
+              replies.push(reply + collabContext);
+
+              currentAgent = {
+                ...updatedAgent,
+                todos: updatedAgent.todos.map(t => t.id === todo.id ? { ...t, status: 'done' as const } : t),
+              };
+              onUpdateAgent(currentAgent);
+            } catch (err) {
+              const errMsg = err instanceof Error ? err.message : 'Unknown error';
+              currentAgent = {
+                ...currentAgent,
+                todos: currentAgent.todos.map(t => t.id === todo.id ? { ...t, status: 'error' as const, error: errMsg } : t),
+              };
+              onUpdateAgent({ ...currentAgent, status: 'idle', currentThought: '' });
+              replies.push(`Error: ${errMsg}`);
+              hadError = true;
+              if (debugMode) addDebug(`[boss] ${emp.name} step ${ti + 1} failed: ${errMsg}`);
+              break;
+            }
+          }
+
+          onUpdateAgent({ ...currentAgent, status: 'idle', currentThought: '' });
+
+          if (!hadError) {
+            bossTodos[idx] = { ...bossTodos[idx], status: 'done' };
+            taskResults[idx] = { agentName: assignment.agentName, success: true, reply: replies.join('\n\n') };
+            if (debugMode) addDebug(`[boss] ${emp.name} completed all ${empTodos.length} steps`);
+          } else {
+            bossTodos[idx] = { ...bossTodos[idx], status: 'error' };
+            taskResults[idx] = { agentName: assignment.agentName, success: false, reply: replies.join('\n\n') };
+            if (debugMode) addDebug(`[boss] ${emp.name} failed`);
           }
         }
 
-        // Final state for this employee
-        onUpdateAgent({ ...currentAgent, status: 'idle', currentThought: '' });
+        // Build context from previous group results
+        const prevContext = prevGroupResults.length > 0
+          ? prevGroupResults.map(r => `${r.agentName}: ${r.reply.slice(0, 300)}`).join('\n')
+          : undefined;
 
-        if (!hadError) {
-          bossTodos[idx] = { ...bossTodos[idx], status: 'done' };
-          taskResults[idx] = { agentName: assignment.agentName, success: true, reply: replies.join('\n\n') };
-          if (debugMode) addDebug(`[boss] ${emp.name} completed all ${empTodos.length} steps`);
+        if (isParallel) {
+          // Run all tasks in this group concurrently
+          await Promise.allSettled(
+            groupTasks.map(({ assignment, idx }) => executeAgentTask(assignment, idx, prevContext))
+          );
         } else {
-          bossTodos[idx] = { ...bossTodos[idx], status: 'error' };
-          taskResults[idx] = { agentName: assignment.agentName, success: false, reply: replies.join('\n\n') };
-          if (debugMode) addDebug(`[boss] ${emp.name} failed`);
+          // Single task in group — run sequentially (with collaboration handoff if applicable)
+          const { assignment, idx } = groupTasks[0];
+          const emp = allEmployees.find(a => a.id === assignment.agentId);
+
+          // Show collaboration with previous group's agents
+          if (prevGroupResults.length > 0 && emp) {
+            const prevAgentName = prevGroupResults[prevGroupResults.length - 1].agentName;
+            const prevEmp = allEmployees.find(a => a.name === prevAgentName);
+            if (prevEmp && prevEmp.id !== emp.id) {
+              await showCollaboration(emp, prevEmp, `💬 Getting context from ${prevEmp.name}`, 2000);
+            }
+          }
+
+          await executeAgentTask(assignment, idx, prevContext);
         }
+
+        // Collect this group's results for the next group's context
+        prevGroupResults = groupTasks
+          .map(({ idx }) => taskResults[idx])
+          .filter((r): r is { agentName: string; success: boolean; reply: string } => !!r && r.success);
       }
 
       // ── Step 6: Summary ──
@@ -667,8 +736,7 @@ export default function ChatWindow({ agent, agents, skills, onUpdateAgent, onAdd
 
       // Track cost (delta from cumulative total_cost_usd)
       if (result.cost !== undefined && result.cost > 0) {
-        const sessionKey = agentState.sessionId || agentState.id;
-        addCumulativeCost(agentState.id, agentState.name, result.cost, result.inputTokens || 0, result.outputTokens || 0, sessionKey);
+        addCumulativeCost(agentState.id, agentState.name, result.cost, result.inputTokens || 0, result.outputTokens || 0, agentState.id);
       }
 
       // Handle any [ASK:Name] collaboration requests in the reply
@@ -687,14 +755,94 @@ export default function ChatWindow({ agent, agents, skills, onUpdateAgent, onAdd
           { skills, useTools: false, colleagues: otherAgents.map(a => ({ name: a.name, role: a.role })) },
         );
         if (followUpResult.cost !== undefined && followUpResult.cost > 0) {
-          const sessionKey = agentState.sessionId || agentState.id;
-          addCumulativeCost(agentState.id, agentState.name, followUpResult.cost, followUpResult.inputTokens || 0, followUpResult.outputTokens || 0, sessionKey);
+          addCumulativeCost(agentState.id, agentState.name, followUpResult.cost, followUpResult.inputTokens || 0, followUpResult.outputTokens || 0, agentState.id);
         }
         return followUpResult.text;
       }
 
       return reply;
     }
+  }
+
+  function handleSendBackground() {
+    if (!input.trim() || isStreaming || !agent || agent.isBoss) return;
+    const userText = input.trim();
+    setInput('');
+
+    const userMsg: Message = { role: 'user', content: userText, timestamp: Date.now() };
+
+    // Create a new session if needed
+    let sessionId = agent.currentSessionId;
+    if (!sessionId) {
+      const session = createSession(agent.id, userText);
+      sessionId = session.id;
+    }
+
+    const updatedWithUser: Agent = {
+      ...agent,
+      history: [...agent.history, userMsg],
+      status: 'background' as AgentStatus,
+      currentThought: `🔄 Background: ${userText.slice(0, 50)}...`,
+      currentSessionId: sessionId,
+    };
+    onUpdateAgent(updatedWithUser);
+
+    const taskId = crypto.randomUUID();
+    const bgTask: BackgroundTask = {
+      id: taskId,
+      agentId: agent.id,
+      agentName: agent.name,
+      prompt: userText,
+      status: 'running',
+      startedAt: Date.now(),
+    };
+
+    // Create the execution function — App will run it and handle completion
+    const execute = async (): Promise<{ reply: string; agent: Agent }> => {
+      const otherAgents = agents.filter(a => a.id !== updatedWithUser.id && !a.isBoss);
+      const result = await sendMessageWithCost(
+        updatedWithUser,
+        userText,
+        EMPTY_KEYS,
+        (partial) => {
+          onUpdateAgent({
+            ...updatedWithUser,
+            status: 'background' as AgentStatus,
+            currentThought: `🔄 ${partial.slice(0, 60)}${partial.length > 60 ? '…' : ''}`,
+          });
+        },
+        undefined, // no abort signal for background tasks
+        {
+          skills,
+          onClaudeCodeEvent: updatedWithUser.subagentDef ? (event) => {
+            if (event.type === 'tool_use' && event.toolName) {
+              const label = `${event.toolName}${event.toolInput?.file_path ? ` ${event.toolInput.file_path}` : ''}`;
+              onUpdateAgent({
+                ...updatedWithUser,
+                status: 'background' as AgentStatus,
+                currentThought: `🔄 ${label}`,
+              });
+            }
+          } : undefined,
+          onPermissionRequest: (request) => {
+            onPermissionNotification?.(updatedWithUser.name, request);
+          },
+          colleagues: otherAgents.map(a => ({ name: a.name, role: a.role })),
+        },
+      );
+
+      const reply = result.text;
+      const assistantMsg: Message = { role: 'assistant', content: reply, timestamp: Date.now() };
+      const finalAgent: Agent = {
+        ...updatedWithUser,
+        history: [...updatedWithUser.history, assistantMsg],
+        status: 'idle',
+        currentThought: reply.slice(0, 80) + (reply.length > 80 ? '...' : ''),
+      };
+      return { reply, agent: finalAgent };
+    };
+
+    onStartBackgroundTask(bgTask, execute);
   }
 
   function handleKeyDown(e: React.KeyboardEvent) {
@@ -796,6 +944,30 @@ export default function ChatWindow({ agent, agents, skills, onUpdateAgent, onAdd
           </div>
         </div>
       )}
+
+      {/* Background task banner */}
+      {(() => {
+        const bgTask = backgroundTasks.find(t => t.agentId === agent.id && t.status === 'running');
+        if (!bgTask) return null;
+        // Uses the elapsed state which ticks every second when workStartedAt is set,
+        // but for background tasks we compute from bgTask.startedAt directly
+        const bgElapsed = Math.floor((Date.now() - bgTask.startedAt) / 1000);
+        return (
+          <div className="px-3 py-2 border-b border-slate-600 bg-indigo-900/30 border-indigo-700/40">
+            <div className="flex items-center gap-2">
+              <span className="relative flex h-2 w-2 shrink-0">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-indigo-400 opacity-75" />
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-indigo-400" />
+              </span>
+              <div className="flex-1 min-w-0">
+                <p className="text-[11px] font-pixel text-indigo-300">Running in background</p>
+                <p className="text-[10px] font-mono text-slate-400 truncate mt-0.5">{bgTask.prompt.slice(0, 80)}</p>
+              </div>
+              <span className="text-[10px] font-mono text-slate-500 shrink-0">{formatElapsed(bgElapsed)}</span>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Status — enhanced for waiting/stuck states */}
       {(agent.status === 'stuck' || agent.status === 'waiting-input' || agent.status === 'waiting-approval') && (
@@ -1062,13 +1234,25 @@ export default function ChatWindow({ agent, agents, skills, onUpdateAgent, onAdd
               stop
             </button>
           ) : (
-            <button
-              onClick={handleSend}
-              disabled={!input.trim()}
-              className="px-2 py-1 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-white text-[11px] font-pixel rounded transition-colors"
-            >
-              send
-            </button>
+            <div className="flex flex-col gap-1">
+              <button
+                onClick={handleSend}
+                disabled={!input.trim()}
+                className="px-2 py-1 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-white text-[11px] font-pixel rounded transition-colors"
+              >
+                send
+              </button>
+              {!agent.isBoss && (
+                <button
+                  onClick={handleSendBackground}
+                  disabled={!input.trim() || backgroundTasks.some(t => t.agentId === agent.id && t.status === 'running')}
+                  className="px-2 py-0.5 bg-slate-700 hover:bg-slate-600 disabled:opacity-30 text-slate-300 text-[9px] font-pixel rounded transition-colors"
+                  title="Run in background — continue working while this agent processes"
+                >
+                  bg
+                </button>
+              )}
+            </div>
           )}
         </div>
       </div>

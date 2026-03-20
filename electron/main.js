@@ -340,7 +340,13 @@ function setupShellIPC() {
       try {
         execCwd = validateDir(cwd || process.env.HOME);
       } catch (err) {
-        resolve({ ok: false, stdout: "", stderr: "", error: err.message, code: -1 });
+        resolve({
+          ok: false,
+          stdout: "",
+          stderr: "",
+          error: err.message,
+          code: -1,
+        });
         return;
       }
 
@@ -435,7 +441,7 @@ function setupShellIPC() {
               TERM: "dumb",
               OUTWORKED_SYS: systemPrompt || "",
             }),
-            timeout: timeoutMs || 300000,
+            timeout: timeoutMs || 0,
           })
         : spawn(SHELL_CMD, ["-l", "-c", cmd], {
             cwd: execCwd,
@@ -443,7 +449,7 @@ function setupShellIPC() {
               TERM: "dumb",
               OUTWORKED_SYS: systemPrompt || "",
             }),
-            timeout: timeoutMs || 300000,
+            timeout: timeoutMs || 0,
           });
 
       claudeProcs.set(reqId, proc);
@@ -699,7 +705,7 @@ function setupShellIPC() {
     const proc = spawn(claudeBin, args, {
       cwd: execCwd,
       env: envVars,
-      timeout: options.timeoutMs || 600000,
+      timeout: options.timeoutMs || 0,
     });
 
     console.log(
@@ -764,25 +770,31 @@ function setupShellIPC() {
       }
     });
 
-    proc.on("close", (code) => {
+    proc.on("close", (code, signal) => {
       claudeProcs.delete(reqId);
       syncCaffeinate();
       cleanupMcpConfig();
       if (code !== 0) {
         console.error(
-          `[claude-code:startAdvanced] reqId=${reqId} exited with code ${code}`,
+          `[claude-code:startAdvanced] reqId=${reqId} exited with code ${code} signal=${signal}`,
         );
         if (stderrBuf)
           console.error(
             `[claude-code:startAdvanced] stderr: ${stderrBuf.slice(0, 2000)}`,
           );
       }
+      // Build a helpful error message for signal-killed processes
+      let errorMsg = code !== 0 && stderrBuf ? stderrBuf.slice(0, 2000) : null;
+      if (signal === "SIGTERM" || code === 143) {
+        errorMsg =
+          "Claude process was terminated (SIGTERM). This may happen if the task exceeded the timeout or the system killed the process. Try again or increase the timeout.";
+      }
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send(
           "claude-code:done",
           reqId,
           code ?? -1,
-          code !== 0 && stderrBuf ? stderrBuf.slice(0, 2000) : null,
+          errorMsg,
         );
       }
     });
@@ -1028,7 +1040,10 @@ function setupShellIPC() {
       // is inside a .claude/agents/ directory under the workspace
       const resolved = path.resolve(filePath);
       const agentsDir = path.join(workspaceDir, ".claude", "agents");
-      if (!resolved.startsWith(agentsDir + path.sep) && resolved !== agentsDir) {
+      if (
+        !resolved.startsWith(agentsDir + path.sep) &&
+        resolved !== agentsDir
+      ) {
         return {
           ok: false,
           error: "Can only write to .claude/agents/ directories",
@@ -1050,7 +1065,10 @@ function setupShellIPC() {
     try {
       const resolved = path.resolve(filePath);
       const agentsDir = path.join(workspaceDir, ".claude", "agents");
-      if (!resolved.startsWith(agentsDir + path.sep) && resolved !== agentsDir) {
+      if (
+        !resolved.startsWith(agentsDir + path.sep) &&
+        resolved !== agentsDir
+      ) {
         return {
           ok: false,
           error: "Can only delete from .claude/agents/ directories",
@@ -1173,7 +1191,10 @@ function ensureDir(dirPath) {
 function resolveSafe(relativePath) {
   // Prevent path traversal outside workspace
   const resolved = path.resolve(workspaceDir, relativePath);
-  if (resolved !== workspaceDir && !resolved.startsWith(workspaceDir + path.sep)) {
+  if (
+    resolved !== workspaceDir &&
+    !resolved.startsWith(workspaceDir + path.sep)
+  ) {
     throw new Error("Path escapes workspace");
   }
   return resolved;
@@ -1185,7 +1206,16 @@ function resolveSafe(relativePath) {
  */
 function validateDir(dir) {
   const resolved = path.resolve(dir);
-  const blockedRoots = ["/", "/etc", "/usr", "/bin", "/sbin", "/var", "/System", "/Library"];
+  const blockedRoots = [
+    "/",
+    "/etc",
+    "/usr",
+    "/bin",
+    "/sbin",
+    "/var",
+    "/System",
+    "/Library",
+  ];
   if (blockedRoots.includes(resolved)) {
     throw new Error(`Refusing to operate in system directory: ${resolved}`);
   }
@@ -1199,7 +1229,16 @@ function setupFilesystemIPC() {
   ipcMain.handle("fs:setWorkspace", (_event, dir) => {
     // Validate: must be an absolute path and not a system-critical directory
     const resolved = path.resolve(dir);
-    const blockedRoots = ["/", "/etc", "/usr", "/bin", "/sbin", "/var", "/System", "/Library"];
+    const blockedRoots = [
+      "/",
+      "/etc",
+      "/usr",
+      "/bin",
+      "/sbin",
+      "/var",
+      "/System",
+      "/Library",
+    ];
     if (blockedRoots.includes(resolved)) {
       throw new Error(`Cannot set workspace to system directory: ${resolved}`);
     }
@@ -1415,7 +1454,9 @@ function setupFilesystemIPC() {
     if (!Array.isArray(keywords) || keywords.length === 0) return [];
 
     // Build a case-insensitive pattern from keywords
-    const patterns = keywords.map((k) => new RegExp(k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), "i"));
+    const patterns = keywords.map(
+      (k) => new RegExp(k.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i"),
+    );
     const results = [];
     const MAX_FILE_SIZE_SEARCH = 256 * 1024; // 256KB max for search
 
@@ -1459,7 +1500,10 @@ function setupFilesystemIPC() {
                   // Extract a snippet around the match
                   const idx = match.index || 0;
                   const start = Math.max(0, idx - 40);
-                  const end = Math.min(content.length, idx + match[0].length + 40);
+                  const end = Math.min(
+                    content.length,
+                    idx + match[0].length + 40,
+                  );
                   matchSnippet = content.slice(start, end).replace(/\n/g, " ");
                   break;
                 }
@@ -1636,7 +1680,11 @@ function setupGitIPC() {
     const env = githubToken
       ? { ...process.env, GH_TOKEN: githubToken, GITHUB_TOKEN: githubToken }
       : process.env;
-    return execFileSync(binary, rest, { ...EXEC_OPTS, cwd: safeCwd, env }).trimEnd();
+    return execFileSync(binary, rest, {
+      ...EXEC_OPTS,
+      cwd: safeCwd,
+      env,
+    }).trimEnd();
   }
 
   // Check if a directory is inside a git repository.
@@ -1754,7 +1802,14 @@ function setupGitIPC() {
           } catch {
             current = "main";
           }
-          return { ok: true, current, branches: [current], remote: "", ahead: 0, behind: 0 };
+          return {
+            ok: true,
+            current,
+            branches: [current],
+            remote: "",
+            ahead: 0,
+            behind: 0,
+          };
         }
         throw e;
       }
@@ -1907,7 +1962,15 @@ function setupGitIPC() {
     const cwd = dir || workspaceDir;
     try {
       // Pass title/body as separate arguments — no shell escaping needed
-      const args = ["gh", "pr", "create", "--title", title, "--body", body || ""];
+      const args = [
+        "gh",
+        "pr",
+        "create",
+        "--title",
+        title,
+        "--body",
+        body || "",
+      ];
       if (baseBranch) args.push("--base", baseBranch);
       const output = git(args, cwd);
       return { ok: true, output, url: output.trim() };
@@ -2209,7 +2272,11 @@ function setupSessionIPC() {
   // Load a single session
   ipcMain.handle("session:load", (_event, agentId, sessionId) => {
     try {
-      const filePath = path.join(SESSIONS_DIR, sanitizeId(agentId), `${sanitizeId(sessionId)}.json`);
+      const filePath = path.join(
+        SESSIONS_DIR,
+        sanitizeId(agentId),
+        `${sanitizeId(sessionId)}.json`,
+      );
       if (!fs.existsSync(filePath)) return { ok: false, error: "not found" };
       const data = JSON.parse(fs.readFileSync(filePath, "utf8"));
       return { ok: true, session: data };
@@ -2261,7 +2328,11 @@ function setupSessionIPC() {
   // Delete a session
   ipcMain.handle("session:delete", (_event, agentId, sessionId) => {
     try {
-      const filePath = path.join(SESSIONS_DIR, sanitizeId(agentId), `${sanitizeId(sessionId)}.json`);
+      const filePath = path.join(
+        SESSIONS_DIR,
+        sanitizeId(agentId),
+        `${sanitizeId(sessionId)}.json`,
+      );
       if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
       return { ok: true };
     } catch (err) {
@@ -2351,7 +2422,6 @@ function createWindow() {
       additionalArguments: [`--homedir=${require("os").homedir()}`],
     },
   });
-
 
   // Load the Vite build output
   const indexPath = path.join(__dirname, "..", "dist-renderer", "index.html");

@@ -74,7 +74,19 @@ export interface ToolCall {
   result: string;
 }
 
-export type AgentStatus = 'idle' | 'thinking' | 'working' | 'speaking' | 'collaborating' | 'waiting-input' | 'waiting-approval' | 'stuck';
+export type AgentStatus = 'idle' | 'thinking' | 'working' | 'speaking' | 'collaborating' | 'waiting-input' | 'waiting-approval' | 'stuck' | 'background';
+
+export interface BackgroundTask {
+  id: string;
+  agentId: string;
+  agentName: string;
+  prompt: string;
+  status: 'running' | 'done' | 'error';
+  startedAt: number;
+  completedAt?: number;
+  result?: string;
+  error?: string;
+}
 
 export type AgentScope = 'user' | 'project';
 
@@ -143,6 +155,7 @@ export interface Agent {
   sessionId?: string; // Claude Code session ID for continuity
   currentSessionId?: string; // active Outworked session ID (for persistence)
   collaboratingWith?: string; // id of agent being consulted (ephemeral, drives walk animation)
+  autoCreated?: boolean; // true if created automatically by the orchestrator
 }
 
 export interface AgentMessage {
