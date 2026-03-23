@@ -582,7 +582,6 @@ export async function loadAgentsFromDisk(workspaceDir?: string): Promise<Agent[]
     const personality = body || `You are ${name}. ${role}`;
     const isBoss = !!def['outworked-boss'];
     const autoCreated = !!def['outworked-auto-created'];
-    console.log(`[loadAgentsFromDisk] ${file.file}: autoCreated=${autoCreated}, raw=${def['outworked-auto-created']}, boss=${isBoss}`);
 
     // Resolve id — generate one if missing
     const hadId = !!def['outworked-id'];

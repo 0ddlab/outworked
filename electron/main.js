@@ -18,6 +18,7 @@ const sdkBridge = require("./sdk-bridge");
 // Set the app name early so macOS notifications show "Outworked" instead of "Electron"
 app.setName("Outworked");
 
+const verbose = process.env.VERBOSE_LOGGING === "true";
 let mainWindow = null;
 
 // ─── Permission helpers ─────────────────────────────────────────
@@ -175,18 +176,20 @@ let caffeinateBlockerId = null;
 function caffeineStart() {
   if (caffeinateBlockerId !== null) return; // already blocking
   caffeinateBlockerId = powerSaveBlocker.start("prevent-app-suspension");
-  console.log(
-    `[caffeinate] started power-save blocker id=${caffeinateBlockerId}`,
-  );
+  verbose &&
+    console.log(
+      `[caffeinate] started power-save blocker id=${caffeinateBlockerId}`,
+    );
 }
 
 function caffeineStop() {
   if (caffeinateBlockerId === null) return;
   if (powerSaveBlocker.isStarted(caffeinateBlockerId)) {
     powerSaveBlocker.stop(caffeinateBlockerId);
-    console.log(
-      `[caffeinate] stopped power-save blocker id=${caffeinateBlockerId}`,
-    );
+    verbose &&
+      console.log(
+        `[caffeinate] stopped power-save blocker id=${caffeinateBlockerId}`,
+      );
   }
   caffeinateBlockerId = null;
 }
@@ -377,27 +380,32 @@ function setupShellIPC() {
         /* best-effort */
       }
 
-      console.log(`[claude-code:start] reqId=${reqId} cwd=${execCwd}`);
+      verbose &&
+        console.log(`[claude-code:start] reqId=${reqId} cwd=${execCwd}`);
       syncCaffeinate();
 
-      sdkBridge.startSession(reqId, {
-        prompt,
-        cwd: execCwd,
-        systemPrompt: systemPrompt || undefined,
-        timeoutMs: timeoutMs || undefined,
-      }, {
-        onMessage: (id, message) => {
-          if (mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.webContents.send("claude-code:event", id, message);
-          }
+      sdkBridge.startSession(
+        reqId,
+        {
+          prompt,
+          cwd: execCwd,
+          systemPrompt: systemPrompt || undefined,
+          timeoutMs: timeoutMs || undefined,
         },
-        onDone: (id, code, error) => {
-          syncCaffeinate();
-          if (mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.webContents.send("claude-code:done", id, code, error);
-          }
+        {
+          onMessage: (id, message) => {
+            if (mainWindow && !mainWindow.isDestroyed()) {
+              mainWindow.webContents.send("claude-code:event", id, message);
+            }
+          },
+          onDone: (id, code, error) => {
+            syncCaffeinate();
+            if (mainWindow && !mainWindow.isDestroyed()) {
+              mainWindow.webContents.send("claude-code:done", id, code, error);
+            }
+          },
         },
-      });
+      );
 
       return reqId;
     },
@@ -423,9 +431,10 @@ function setupShellIPC() {
       /* best-effort */
     }
 
-    console.log(
-      `[claude-code:startAdvanced] reqId=${reqId} cwd=${execCwd} model=${options.model || "default"}`,
-    );
+    verbose &&
+      console.log(
+        `[claude-code:startAdvanced] reqId=${reqId} cwd=${execCwd} model=${options.model || "default"}`,
+      );
 
     syncCaffeinate();
 
@@ -700,9 +709,17 @@ function setupShellIPC() {
       // Allow both project-scope and user-scope (~/.claude/agents/)
       const resolved = path.resolve(filePath);
       const projectAgentsDir = path.join(workspaceDir, ".claude", "agents");
-      const userAgentsDir = path.join(require("os").homedir(), ".claude", "agents");
-      const inProject = resolved.startsWith(projectAgentsDir + path.sep) || resolved === projectAgentsDir;
-      const inUser = resolved.startsWith(userAgentsDir + path.sep) || resolved === userAgentsDir;
+      const userAgentsDir = path.join(
+        require("os").homedir(),
+        ".claude",
+        "agents",
+      );
+      const inProject =
+        resolved.startsWith(projectAgentsDir + path.sep) ||
+        resolved === projectAgentsDir;
+      const inUser =
+        resolved.startsWith(userAgentsDir + path.sep) ||
+        resolved === userAgentsDir;
       if (!inProject && !inUser) {
         return {
           ok: false,
@@ -725,9 +742,17 @@ function setupShellIPC() {
     try {
       const resolved = path.resolve(filePath);
       const projectAgentsDir = path.join(workspaceDir, ".claude", "agents");
-      const userAgentsDir = path.join(require("os").homedir(), ".claude", "agents");
-      const inProject = resolved.startsWith(projectAgentsDir + path.sep) || resolved === projectAgentsDir;
-      const inUser = resolved.startsWith(userAgentsDir + path.sep) || resolved === userAgentsDir;
+      const userAgentsDir = path.join(
+        require("os").homedir(),
+        ".claude",
+        "agents",
+      );
+      const inProject =
+        resolved.startsWith(projectAgentsDir + path.sep) ||
+        resolved === projectAgentsDir;
+      const inUser =
+        resolved.startsWith(userAgentsDir + path.sep) ||
+        resolved === userAgentsDir;
       if (!inProject && !inUser) {
         return {
           ok: false,

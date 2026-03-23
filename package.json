@@ -10,7 +10,7 @@
     "dev": "vite",
     "build": "vite build",
     "lint": "eslint",
-    "electron:dev": "vite build && electron .",
+    "electron:dev": "vite build && VERBOSE_LOGGING=true electron .",
     "electron:build": "vite build && electron-builder --config electron-builder.yml"
   },
   "dependencies": {
