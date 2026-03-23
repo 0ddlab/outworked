@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Agent, MODELS, SPRITE_KEYS, AGENT_COLORS, SubagentDef, AgentScope } from '../lib/types';
 import { writeClaudeAgentFile, deleteClaudeAgentFile, getHomedir } from '../lib/terminal';
 import { buildSubagentMd, generateAgentWithAI, parseSubagentFrontmatter } from '../lib/storage';
@@ -13,6 +13,24 @@ interface AgentEditorProps {
 
 export default function AgentEditor({ agent, workspaceDir, onSave, onDelete, onClose }: AgentEditorProps) {
   const [draft, setDraft] = useState<Agent>({ ...agent });
+
+  // Sync draft when the agent prop's persistent fields change externally
+  // (e.g., AI generation completes and updates personality/name/role/subagentDef)
+  const prevAgentRef = useRef(agent);
+  useEffect(() => {
+    const prev = prevAgentRef.current;
+    if (
+      prev.name !== agent.name ||
+      prev.role !== agent.role ||
+      prev.personality !== agent.personality ||
+      prev.subagentFile !== agent.subagentFile ||
+      prev.subagentDef !== agent.subagentDef ||
+      prev.agentScope !== agent.agentScope
+    ) {
+      setDraft({ ...agent });
+      prevAgentRef.current = agent;
+    }
+  }, [agent]);
   const [tab, setTab] = useState<'profile' | 'subagent' | 'history'>('profile');
   const [saving, setSaving] = useState(false);
   const [generating, setGenerating] = useState(false);
@@ -117,7 +135,7 @@ export default function AgentEditor({ agent, workspaceDir, onSave, onDelete, onC
               setSaving(true);
               try {
                 const slug = draft.subagentFile.split('/').pop()?.replace(/\.md$/, '') || draft.name;
-                const content = buildSubagentMd(slug, defToSave, draft.personality, draft.name, draft.role);
+                const content = buildSubagentMd({ ...draft, subagentDef: defToSave }, slug);
 
                 // Determine the correct target path based on current scope
                 const scope = draft.agentScope || 'user';
@@ -210,7 +228,7 @@ export default function AgentEditor({ agent, workspaceDir, onSave, onDelete, onC
             // Also persist subagent settings to the .md file if applicable
             if (draft.subagentFile && draft.subagentDef) {
               const slug = draft.subagentFile.split('/').pop()?.replace(/\.md$/, '') || draft.name;
-              const content = buildSubagentMd(slug, draft.subagentDef, draft.personality, draft.name, draft.role);
+              const content = buildSubagentMd(draft, slug);
               const scope = draft.agentScope || 'user';
               const targetPath = scope === 'project' && workspaceDir
                 ? `${workspaceDir}/.claude/agents/${slug}.md`
@@ -278,6 +296,20 @@ function SubagentTab({
   const [skillsText, setSkillsText] = useState((def.skills || []).join(', '));
   const [mcpText, setMcpText] = useState(() => serializeMcpServers(def.mcpServers));
   const [hooksText, setHooksText] = useState(() => serializeHooks(def.hooks));
+
+  // Resync local text fields when the subagentDef changes externally (e.g., AI generation)
+  const prevDefRef = useRef(agent.subagentDef);
+  useEffect(() => {
+    if (prevDefRef.current !== agent.subagentDef) {
+      const d = agent.subagentDef || { description: '' };
+      setToolsText((d.tools || []).join(', '));
+      setDisallowedToolsText((d.disallowedTools || []).join(', '));
+      setSkillsText((d.skills || []).join(', '));
+      setMcpText(serializeMcpServers(d.mcpServers));
+      setHooksText(serializeHooks(d.hooks));
+      prevDefRef.current = agent.subagentDef;
+    }
+  }, [agent.subagentDef]);
 
   function updateDef(partial: Partial<SubagentDef>) {
     onUpdate({ subagentDef: { ...def, ...partial } });

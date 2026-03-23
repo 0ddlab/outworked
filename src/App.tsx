@@ -1,63 +1,163 @@
-import { useEffect, useState, useCallback, useRef, lazy, Suspense } from 'react';
-import { Agent, AgentSkill, AgentStatus, BackgroundTask, SubagentDef } from './lib/types';
-import { loadAgents, saveAgents, loadSkills, saveSkills, createAgent, createClaudeAgentFile, generateAgentWithAI, resetProject, syncClaudeSubagents, upgradeAgentsToClaudeCode, parseSubagentFrontmatter } from './lib/storage';
-import { migrateHistoryToSession, loadSession } from './lib/sessions';
-import { getClaudeCodeAuthStatus, isElectron, onClaudeAgentsChanged, watchProjectAgents, readClaudeSettings, deleteClaudeAgentFile } from './lib/terminal';
-import { getWorkspace, setWorkspace } from './lib/filesystem';
-import AgentList from './components/AgentList';
-import AgentEditor from './components/AgentEditor';
-import ChatWindow, { OrchestrationDoneEvent } from './components/ChatWindow';
-import TerminalPanel from './components/TerminalPanel';
-import  { InstructionRun } from './components/OfficeInstructions';
-import AgentTasks from './components/AgentTasks';
-import SkillsPanel from './components/SkillsPanel';
-import MusicPlayer from './components/MusicPlayer';
-import ClaudeCodeStatus from './components/ClaudeCodeStatus';
-import WorkspacePicker from './components/WorkspacePicker';
-import PermissionsPanel, { PermissionsBanner } from './components/PermissionsPanel';
-import WorkspacePanel from './components/WorkspacePanel';
-import GitPanel from './components/GitPanel';
-import CostDashboard from './components/CostDashboard';
-import NotificationCenter, { NotificationToast } from './components/NotificationCenter';
-import OnboardingModal from './components/OnboardingModal';
-import { AppNotification, showDesktopNotification } from './lib/notifications';
-import { playTaskComplete, playApprovalNeeded, playAgentStuck, playOrchestrationComplete, playOrchestrationWarning, getSoundsEnabled } from './lib/sounds';
-import { sendClaudeCodeInput, PermissionRequest } from './lib/terminal';
+import {
+  useEffect,
+  useState,
+  useCallback,
+  useRef,
+  lazy,
+  Suspense,
+} from "react";
+import {
+  Agent,
+  AgentSkill,
+  AgentStatus,
+  BackgroundTask,
+  SubagentDef,
+} from "./lib/types";
+import {
+  loadSkills,
+  saveSkills,
+  createAgent,
+  createClaudeAgentFile,
+  generateAgentWithAI,
+  resetProject,
+  parseSubagentFrontmatter,
+  loadAgentsFromDisk,
+  saveAgentToDisk,
+  migrateLocalStorageAgents,
+} from "./lib/storage";
+import { migrateHistoryToSession, loadSession } from "./lib/sessions";
+import {
+  getClaudeCodeAuthStatus,
+  isElectron,
+  onClaudeAgentsChanged,
+  watchProjectAgents,
+  readClaudeSettings,
+  deleteClaudeAgentFile,
+} from "./lib/terminal";
+import { getWorkspace, setWorkspace } from "./lib/filesystem";
+import AgentList from "./components/AgentList";
+import AgentEditor from "./components/AgentEditor";
+import ChatWindow, { OrchestrationDoneEvent } from "./components/ChatWindow";
+import TerminalPanel from "./components/TerminalPanel";
+import { InstructionRun } from "./components/OfficeInstructions";
+import AgentTasks from "./components/AgentTasks";
+import SkillsPanel from "./components/SkillsPanel";
+import MusicPlayer from "./components/MusicPlayer";
+import ClaudeCodeStatus from "./components/ClaudeCodeStatus";
+import WorkspacePicker from "./components/WorkspacePicker";
+import PermissionsPanel, {
+  PermissionsBanner,
+} from "./components/PermissionsPanel";
+import WorkspacePanel from "./components/WorkspacePanel";
+import GitPanel from "./components/GitPanel";
+import CostDashboard from "./components/CostDashboard";
+import NotificationCenter, {
+  NotificationToast,
+} from "./components/NotificationCenter";
+import OnboardingModal from "./components/OnboardingModal";
+import { AppNotification, showDesktopNotification } from "./lib/notifications";
+import {
+  playTaskComplete,
+  playApprovalNeeded,
+  playAgentStuck,
+  playOrchestrationComplete,
+  playOrchestrationWarning,
+  getSoundsEnabled,
+} from "./lib/sounds";
+import { sendClaudeCodeInput, PermissionRequest } from "./lib/terminal";
 
-const OfficeCanvas = lazy(() => import('./components/OfficeCanvas'));
+const OfficeCanvas = lazy(() => import("./components/OfficeCanvas"));
 
-type RightPanel = 'chat' | 'editor' | 'terminal' | 'workspace' | 'git' | 'instructions' | 'tasks';
+type RightPanel =
+  | "chat"
+  | "editor"
+  | "terminal"
+  | "workspace"
+  | "git"
+  | "instructions"
+  | "tasks";
+
+/** Ephemeral fields that should NOT trigger a disk write */
+const EPHEMERAL_KEYS = new Set<keyof Agent>([
+  "status",
+  "currentThought",
+  "todos",
+  "history",
+  "currentSessionId",
+  "sessionId",
+  "collaboratingWith",
+]);
+
+/**
+ * Merge ephemeral runtime state from `prev` onto `fresh` agents loaded from disk.
+ * Matches by agent id (outworked-id in frontmatter). Any agent in `fresh` that
+ * exists in `prev` gets its ephemeral fields carried over.
+ */
+function mergeRuntimeState(prev: Agent[], fresh: Agent[]): Agent[] {
+  const prevById = new Map(prev.map((a) => [a.id, a]));
+  const freshIds = new Set(fresh.map((a) => a.id));
+  const merged = fresh.map((f) => {
+    const p = prevById.get(f.id);
+    if (!p) return f;
+    return {
+      ...f,
+      status: p.status,
+      currentThought: p.currentThought,
+      todos: p.todos,
+      history: p.history,
+      currentSessionId: p.currentSessionId,
+      sessionId: p.sessionId,
+      collaboratingWith: p.collaboratingWith,
+    };
+  });
+  // Keep any prev agents not yet on disk (optimistic adds awaiting file write)
+  for (const p of prev) {
+    if (!freshIds.has(p.id)) {
+      merged.push(p);
+    }
+  }
+  return merged;
+}
 
 export default function App() {
   const [agents, setAgents] = useState<Agent[]>([]);
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
-  const [rightPanel, setRightPanel] = useState<RightPanel>('chat');
+  const [rightPanel, setRightPanel] = useState<RightPanel>("chat");
   const [skills, setSkills] = useState<AgentSkill[]>([]);
   const [instructionRuns, setInstructionRuns] = useState<InstructionRun[]>([]);
-  const [agentTeamsEnabled, setAgentTeamsEnabled] = useState(() => localStorage.getItem('outworked_agent_teams') === '1');
+  const [agentTeamsEnabled, setAgentTeamsEnabled] = useState(
+    () => localStorage.getItem("outworked_agent_teams") === "1",
+  );
   const [claudeReady, setClaudeReady] = useState(false);
   const [workspaceDir, setWorkspaceDir] = useState<string | null>(null);
   const [showWorkspacePicker, setShowWorkspacePicker] = useState(false);
   const [startupDone, setStartupDone] = useState(false);
-  const [hirePrompt, setHirePrompt] = useState<{ resolve: (value: string | null) => void } | null>(null);
+  const [hirePrompt, setHirePrompt] = useState<{
+    resolve: (value: string | null) => void;
+  } | null>(null);
   const [showPermsModal, setShowPermsModal] = useState(false);
   const [showCostsModal, setShowCostsModal] = useState(false);
   const [permsEmpty, setPermsEmpty] = useState(false);
   const [permsDismissed, setPermsDismissed] = useState(false);
-  const [debugMode, setDebugMode] = useState(() => localStorage.getItem('outworked_debug') === '1');
-  const [orchToast, setOrchToast] = useState<OrchestrationDoneEvent | null>(null);
+  const [debugMode, setDebugMode] = useState(
+    () => localStorage.getItem("outworked_debug") === "1",
+  );
+  const [orchToast, setOrchToast] = useState<OrchestrationDoneEvent | null>(
+    null,
+  );
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [latestToast, setLatestToast] = useState<AppNotification | null>(null);
-  const [showOnboarding, setShowOnboarding] = useState(() => !localStorage.getItem('outworked_onboarding_done'));
+  const [showOnboarding, setShowOnboarding] = useState(
+    () => !localStorage.getItem("outworked_onboarding_done"),
+  );
   const [backgroundTasks, setBackgroundTasks] = useState<BackgroundTask[]>([]);
 
   useEffect(() => {
     async function init() {
-      const initialAgents = loadAgents();
       setSkills(loadSkills());
 
       // Load saved workspace dir
-      const savedWs = localStorage.getItem('outworked_workspace_dir');
+      const savedWs = localStorage.getItem("outworked_workspace_dir");
 
       // Check Claude Code availability
       let ccReady = false;
@@ -65,24 +165,20 @@ export default function App() {
         try {
           const authStatus = await getClaudeCodeAuthStatus();
           ccReady = !!(authStatus.installed && authStatus.authenticated);
-        } catch { /* not available */ }
+        } catch {
+          /* not available */
+        }
       }
       setClaudeReady(ccReady);
 
-      // If Claude Code is ready, upgrade all default agents to use it
-      let currentAgents = initialAgents;
-      if (ccReady) {
-        currentAgents = upgradeAgentsToClaudeCode(currentAgents);
-      }
-      setAgents(currentAgents);
+      // Migrate any agents previously stored in localStorage to .md files
+      const wsDir =
+        savedWs || (isElectron() ? await getWorkspace() : undefined);
+      await migrateLocalStorageAgents(wsDir || undefined);
 
-      // Sync Claude Code subagents (pass workspace for project scope)
-      const wsDir = savedWs || (isElectron() ? await getWorkspace() : undefined);
-      syncClaudeSubagents(currentAgents, wsDir || undefined).then((synced) => {
-        if (synced !== currentAgents) {
-          setAgents(synced);
-        }
-      });
+      // Load agents from disk (.md files are the single source of truth)
+      const diskAgents = await loadAgentsFromDisk(wsDir || undefined);
+      setAgents(diskAgents);
 
       // Load workspace dir — show picker if none saved
       if (isElectron()) {
@@ -99,43 +195,65 @@ export default function App() {
       }
 
       // Migrate any existing in-memory history to sessions (one-time)
-      const migrated = localStorage.getItem('outworked_sessions_migrated');
+      const migrated = localStorage.getItem("outworked_sessions_migrated");
       if (!migrated) {
-        const rawAgents = (() => { try { const r = localStorage.getItem('outworked_agents'); return r ? JSON.parse(r) : []; } catch { return []; } })();
+        const rawAgents = (() => {
+          try {
+            const r = localStorage.getItem("outworked_agents");
+            return r ? JSON.parse(r) : [];
+          } catch {
+            return [];
+          }
+        })();
         for (const raw of rawAgents) {
           if (raw.history && raw.history.length > 0 && !raw.currentSessionId) {
-            const session = await migrateHistoryToSession(raw.id, raw.history, raw.sessionId);
+            const session = await migrateHistoryToSession(
+              raw.id,
+              raw.history,
+              raw.sessionId,
+            );
             if (session) {
-              setAgents(prev => prev.map(a => a.id === raw.id ? { ...a, currentSessionId: session.id, history: session.messages } : a));
+              setAgents((prev) =>
+                prev.map((a) =>
+                  a.id === raw.id
+                    ? {
+                        ...a,
+                        currentSessionId: session.id,
+                        history: session.messages,
+                      }
+                    : a,
+                ),
+              );
             }
           }
         }
-        localStorage.setItem('outworked_sessions_migrated', '1');
+        localStorage.setItem("outworked_sessions_migrated", "1");
       }
 
       setStartupDone(true);
 
       // Check whether any permission rules exist
-      const wsDir2 = savedWs || (isElectron() ? await getWorkspace() : undefined);
+      const wsDir2 =
+        savedWs || (isElectron() ? await getWorkspace() : undefined);
       if (wsDir2) {
-        const { settings } = await readClaudeSettings('project');
+        const { settings } = await readClaudeSettings("project");
         const perms = settings.permissions || { allow: [], deny: [] };
-        const empty = (!perms.allow || perms.allow.length === 0) && (!perms.deny || perms.deny.length === 0);
+        const empty =
+          (!perms.allow || perms.allow.length === 0) &&
+          (!perms.deny || perms.deny.length === 0);
         setPermsEmpty(empty);
       }
     }
     init();
   }, []);
 
-  // Auto-sync when Claude Code agent files change on disk
+  // Auto-reload when Claude Code agent files change on disk
   useEffect(() => {
     const unsub = onClaudeAgentsChanged(() => {
-      const wsDir = localStorage.getItem('outworked_workspace_dir') || undefined;
-      setAgents((prev) => {
-        syncClaudeSubagents(prev, wsDir).then((synced) => {
-          if (synced !== prev) setAgents(synced);
-        });
-        return prev;
+      const wsDir =
+        localStorage.getItem("outworked_workspace_dir") || undefined;
+      loadAgentsFromDisk(wsDir).then((fresh) => {
+        setAgents((prev) => mergeRuntimeState(prev, fresh));
       });
     });
     return unsub;
@@ -145,36 +263,59 @@ export default function App() {
 
   // Hydrate session from disk when selecting an agent with a saved session but empty history
   useEffect(() => {
-    if (!selectedAgent?.currentSessionId || selectedAgent.history.length > 0) return;
-    loadSession(selectedAgent.id, selectedAgent.currentSessionId).then(session => {
-      if (session) {
-        setAgents(prev => prev.map(a =>
-          a.id === selectedAgent.id
-            ? { ...a, history: session.messages, sessionId: session.claudeSessionId }
-            : a
-        ));
-      }
-    });
+    if (!selectedAgent?.currentSessionId || selectedAgent.history.length > 0)
+      return;
+    loadSession(selectedAgent.id, selectedAgent.currentSessionId).then(
+      (session) => {
+        if (session) {
+          setAgents((prev) =>
+            prev.map((a) =>
+              a.id === selectedAgent.id
+                ? {
+                    ...a,
+                    history: session.messages,
+                    sessionId: session.claudeSessionId,
+                  }
+                : a,
+            ),
+          );
+        }
+      },
+    );
   }, [selectedAgentId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const updateAgent = useCallback((updated: Agent) => {
     setAgents((prev) => {
+      const old = prev.find((a) => a.id === updated.id);
       const next = prev.map((a) => (a.id === updated.id ? updated : a));
-      saveAgents(next);
+      // Only write to disk if a persistent (non-ephemeral) field changed
+      if (old) {
+        const hasPersistentChange = (
+          Object.keys(updated) as (keyof Agent)[]
+        ).some((k) => !EPHEMERAL_KEYS.has(k) && updated[k] !== old[k]);
+        if (hasPersistentChange) {
+          const wsDir =
+            localStorage.getItem("outworked_workspace_dir") || undefined;
+          saveAgentToDisk(updated, wsDir);
+        }
+      }
       return next;
     });
   }, []);
 
-  const pushNotification = useCallback((notif: Omit<AppNotification, 'id' | 'timestamp' | 'read'>) => {
-    const full: AppNotification = {
-      ...notif,
-      id: crypto.randomUUID(),
-      timestamp: Date.now(),
-      read: false,
-    };
-    setNotifications(prev => [full, ...prev].slice(0, 100)); // Keep max 100
-    setLatestToast(full);
-  }, []);
+  const pushNotification = useCallback(
+    (notif: Omit<AppNotification, "id" | "timestamp" | "read">) => {
+      const full: AppNotification = {
+        ...notif,
+        id: crypto.randomUUID(),
+        timestamp: Date.now(),
+        read: false,
+      };
+      setNotifications((prev) => [full, ...prev].slice(0, 100)); // Keep max 100
+      setLatestToast(full);
+    },
+    [],
+  );
 
   // Track previous agent statuses to detect changes
   const prevStatusRef = useRef<Record<string, AgentStatus>>({});
@@ -185,29 +326,38 @@ export default function App() {
       if (prev === agent.status) continue;
 
       // Agent just became stuck
-      if (agent.status === 'stuck' && prev !== 'stuck') {
+      if (agent.status === "stuck" && prev !== "stuck") {
         pushNotification({
-          type: 'agent-stuck',
+          type: "agent-stuck",
           title: `${agent.name} is stuck`,
-          body: agent.currentThought || 'No progress detected',
+          body: agent.currentThought || "No progress detected",
           agentName: agent.name,
           agentColor: agent.color,
         });
         if (getSoundsEnabled()) playAgentStuck();
-        showDesktopNotification(`${agent.name} is stuck`, agent.currentThought || 'No progress detected');
+        showDesktopNotification(
+          `${agent.name} is stuck`,
+          agent.currentThought || "No progress detected",
+        );
       }
 
       // Agent finished (went from working/thinking/speaking to idle)
-      if (agent.status === 'idle' && (prev === 'working' || prev === 'thinking' || prev === 'speaking')) {
+      if (
+        agent.status === "idle" &&
+        (prev === "working" || prev === "thinking" || prev === "speaking")
+      ) {
         pushNotification({
-          type: 'task-complete',
+          type: "task-complete",
           title: `${agent.name} finished`,
-          body: agent.currentThought || 'Task complete',
+          body: agent.currentThought || "Task complete",
           agentName: agent.name,
           agentColor: agent.color,
         });
         if (getSoundsEnabled()) playTaskComplete();
-        showDesktopNotification(`${agent.name} finished`, agent.currentThought || 'Task complete');
+        showDesktopNotification(
+          `${agent.name} finished`,
+          agent.currentThought || "Task complete",
+        );
       }
 
       prevStatusRef.current[agent.id] = agent.status;
@@ -216,7 +366,7 @@ export default function App() {
 
   const handleAgentClick = useCallback((agent: Agent) => {
     setSelectedAgentId(agent.id);
-    setRightPanel('chat');
+    setRightPanel("chat");
   }, []);
 
   function handleAddAgent() {
@@ -233,50 +383,76 @@ export default function App() {
     }
   }
 
-  function finishHire(description: string | null) {
-    const agent = createAgent({
-      position: { x: Math.floor(Math.random() * 10) + 2, y: Math.floor(Math.random() * 6) + 2 },
-    }, claudeReady);
+  async function finishHire(description: string | null) {
+    const agent = createAgent(
+      {
+        role: description || undefined,
+        position: {
+          x: Math.floor(Math.random() * 10) + 2,
+          y: Math.floor(Math.random() * 6) + 2,
+        },
+      },
+      claudeReady,
+    );
+
+    if (claudeReady && !description) {
+      // No AI generation — create the .md file immediately
+      const filePath = await createClaudeAgentFile(agent, workspaceDir || undefined);
+      if (filePath) {
+        agent.subagentFile = filePath;
+        agent.subagentDef = { description: agent.role };
+      }
+    }
+
     const next = [...agents, agent];
     setAgents(next);
-    saveAgents(next);
     setSelectedAgentId(agent.id);
-    setRightPanel('editor');
+    setRightPanel("editor");
 
     if (claudeReady && description) {
       // AI-generate a full agent .md from the description
-      updateAgent({ ...agent, status: 'thinking', currentThought: 'Being onboarded by AI...' });
+      updateAgent({
+        ...agent,
+        status: "thinking",
+        currentThought: "Being onboarded by AI...",
+      });
       generateAgentWithAI(description, {
         workspaceDir: workspaceDir || undefined,
-      }).then((result) => {
+        skipWrite: true,
+      }).then(async (result) => {
         if (result) {
           const parsed = parseSubagentFrontmatter(result.content);
-          const name = parsed.def['outworked-name'] || parsed.def.name || agent.name;
-          const role = parsed.def['outworked-role'] || parsed.def.description || agent.role;
-          updateAgent({
+          const name =
+            parsed.def["outworked-name"] || parsed.def.name || agent.name;
+          const role =
+            parsed.def["outworked-role"] ||
+            parsed.def.description ||
+            agent.role;
+
+          const updatedAgent: Agent = {
             ...agent,
             name,
             role,
             personality: parsed.body || agent.personality,
             subagentFile: result.filePath,
             subagentDef: { description: role, ...parsed.def } as SubagentDef,
-            status: 'idle',
-            currentThought: '',
-          });
+            status: "idle",
+            currentThought: "",
+          };
+
+          // Re-write the file with the correct outworked-id and metadata
+          await saveAgentToDisk(updatedAgent, workspaceDir || undefined);
+          updateAgent(updatedAgent);
         } else {
-          // Fallback: create a bare stub
-          createClaudeAgentFile(agent, workspaceDir || undefined).then((filePath) => {
-            if (filePath) {
-              updateAgent({ ...agent, subagentFile: filePath, subagentDef: { description: agent.role }, status: 'idle', currentThought: '' });
-            }
+          // AI failed — fall back to creating a bare stub
+          const filePath = await createClaudeAgentFile(agent, workspaceDir || undefined);
+          updateAgent({
+            ...agent,
+            subagentFile: filePath || undefined,
+            subagentDef: filePath ? { description: agent.role } : undefined,
+            status: "idle",
+            currentThought: "",
           });
-        }
-      });
-    } else if (claudeReady) {
-      // User cancelled the prompt — create a bare stub
-      createClaudeAgentFile(agent, workspaceDir || undefined).then((filePath) => {
-        if (filePath) {
-          updateAgent({ ...agent, subagentFile: filePath, subagentDef: { description: agent.role } });
         }
       });
     }
@@ -284,7 +460,7 @@ export default function App() {
 
   function handleSaveAgent(updated: Agent) {
     updateAgent(updated);
-    setRightPanel('chat');
+    setRightPanel("chat");
   }
 
   function handleDeleteAgent(agentId: string) {
@@ -296,14 +472,27 @@ export default function App() {
     }
     const next = agents.filter((a) => a.id !== agentId);
     setAgents(next);
-    saveAgents(next);
     setSelectedAgentId(null);
   }
 
   const handleAddDynamicAgent = useCallback((agent: Agent) => {
     setAgents((prev) => {
-      const next = [...prev, agent];
-      saveAgents(next);
+      // Dedup: the file watcher may have already added this agent from disk
+      if (prev.some((a) => a.id === agent.id)) return prev;
+      return [...prev, agent];
+    });
+  }, []);
+
+  const handleSaveAutoAgent = useCallback((agentId: string) => {
+    setAgents((prev) => {
+      const agent = prev.find((a) => a.id === agentId);
+      if (!agent) return prev;
+      const saved = { ...agent, autoCreated: false };
+      const next = prev.map((a) => (a.id === agentId ? saved : a));
+      // Rewrite the .md file without the outworked-auto-created flag
+      const wsDir =
+        localStorage.getItem("outworked_workspace_dir") || undefined;
+      saveAgentToDisk(saved, wsDir);
       return next;
     });
   }, []);
@@ -314,119 +503,173 @@ export default function App() {
   }, []);
 
   const toggleDebug = useCallback(() => {
-    setDebugMode(prev => {
+    setDebugMode((prev) => {
       const next = !prev;
-      localStorage.setItem('outworked_debug', next ? '1' : '0');
+      localStorage.setItem("outworked_debug", next ? "1" : "0");
       return next;
     });
   }, []);
 
-  const handleOrchestrationDone = useCallback((event: OrchestrationDoneEvent) => {
-    setOrchToast(event);
-    setTimeout(() => setOrchToast(null), 8000);
+  const handleOrchestrationDone = useCallback(
+    (event: OrchestrationDoneEvent) => {
+      setOrchToast(event);
+      setTimeout(() => setOrchToast(null), 8000);
 
-    // Push notification
-    const allSuccess = event.failed === 0;
-    pushNotification({
-      type: 'orchestration-done',
-      title: allSuccess ? 'All tasks complete!' : 'Tasks finished with issues',
-      body: `${event.success} succeeded, ${event.failed} failed — ${event.plan}`,
-    });
-    if (getSoundsEnabled()) {
-      if (allSuccess) playOrchestrationComplete();
-      else playOrchestrationWarning();
-    }
-    showDesktopNotification(
-      allSuccess ? 'All tasks complete!' : 'Tasks finished',
-      `${event.success}/${event.success + event.failed} tasks succeeded`
-    );
-  }, [pushNotification]);
-
-  const handleStartBackgroundTask = useCallback((task: BackgroundTask, execute: () => Promise<{ reply: string; agent: Agent }>) => {
-    // Add to background task list
-    setBackgroundTasks(prev => [...prev, task]);
-
-    // Run the task — don't await, it runs in the background
-    execute().then(({ agent: finalAgent }) => {
-      // Update agent with results
-      updateAgent(finalAgent);
-      // Mark task as done
-      setBackgroundTasks(prev => prev.map(t =>
-        t.id === task.id ? { ...t, status: 'done' as const, completedAt: Date.now(), result: finalAgent.currentThought } : t
-      ));
-      // Notification
+      // Push notification
+      const allSuccess = event.failed === 0;
       pushNotification({
-        type: 'task-complete',
-        title: `${task.agentName} finished background task`,
-        body: task.prompt.slice(0, 80),
-        agentName: task.agentName,
-        agentColor: agents.find(a => a.id === task.agentId)?.color,
+        type: "orchestration-done",
+        title: allSuccess
+          ? "All tasks complete!"
+          : "Tasks finished with issues",
+        body: `${event.success} succeeded, ${event.failed} failed — ${event.plan}`,
       });
-      if (getSoundsEnabled()) playTaskComplete();
-      showDesktopNotification(`${task.agentName} finished`, task.prompt.slice(0, 80));
-    }).catch((err) => {
-      const errorMsg = err instanceof Error ? err.message : 'Unknown error';
-      // Update agent to idle on error
-      const agentNow = agents.find(a => a.id === task.agentId);
-      if (agentNow) {
-        updateAgent({ ...agentNow, status: 'idle', currentThought: '' });
+      if (getSoundsEnabled()) {
+        if (allSuccess) playOrchestrationComplete();
+        else playOrchestrationWarning();
       }
-      // Mark task as error
-      setBackgroundTasks(prev => prev.map(t =>
-        t.id === task.id ? { ...t, status: 'error' as const, completedAt: Date.now(), error: errorMsg } : t
-      ));
-      pushNotification({
-        type: 'agent-stuck',
-        title: `${task.agentName} background task failed`,
-        body: errorMsg,
-        agentName: task.agentName,
-        agentColor: agents.find(a => a.id === task.agentId)?.color,
-      });
-    });
-  }, [agents, updateAgent, pushNotification]);
+      showDesktopNotification(
+        allSuccess ? "All tasks complete!" : "Tasks finished",
+        `${event.success}/${event.success + event.failed} tasks succeeded`,
+      );
+    },
+    [pushNotification],
+  );
 
-  const handlePermissionNotification = useCallback((agentName: string, request: PermissionRequest) => {
-    pushNotification({
-      type: 'approval',
-      title: `${agentName} needs approval`,
-      body: `${request.tool}: ${request.description}`,
-      agentName,
-      agentColor: agents.find(a => a.name === agentName)?.color,
-      permissionReqId: request.reqId,
-      permissionTool: request.tool,
-      permissionDesc: request.description,
-    });
-    if (getSoundsEnabled()) playApprovalNeeded();
-    showDesktopNotification(`${agentName} needs approval`, `${request.tool}: ${request.description}`);
-  }, [agents, pushNotification]);
+  const handleStartBackgroundTask = useCallback(
+    (
+      task: BackgroundTask,
+      execute: () => Promise<{ reply: string; agent: Agent }>,
+    ) => {
+      // Add to background task list
+      setBackgroundTasks((prev) => [...prev, task]);
+
+      // Run the task — don't await, it runs in the background
+      execute()
+        .then(({ agent: finalAgent }) => {
+          // Update agent with results
+          updateAgent(finalAgent);
+          // Mark task as done
+          setBackgroundTasks((prev) =>
+            prev.map((t) =>
+              t.id === task.id
+                ? {
+                    ...t,
+                    status: "done" as const,
+                    completedAt: Date.now(),
+                    result: finalAgent.currentThought,
+                  }
+                : t,
+            ),
+          );
+          // Notification
+          pushNotification({
+            type: "task-complete",
+            title: `${task.agentName} finished background task`,
+            body: task.prompt.slice(0, 80),
+            agentName: task.agentName,
+            agentColor: agents.find((a) => a.id === task.agentId)?.color,
+          });
+          if (getSoundsEnabled()) playTaskComplete();
+          showDesktopNotification(
+            `${task.agentName} finished`,
+            task.prompt.slice(0, 80),
+          );
+        })
+        .catch((err) => {
+          const errorMsg = err instanceof Error ? err.message : "Unknown error";
+          // Update agent to idle on error
+          const agentNow = agents.find((a) => a.id === task.agentId);
+          if (agentNow) {
+            updateAgent({ ...agentNow, status: "idle", currentThought: "" });
+          }
+          // Mark task as error
+          setBackgroundTasks((prev) =>
+            prev.map((t) =>
+              t.id === task.id
+                ? {
+                    ...t,
+                    status: "error" as const,
+                    completedAt: Date.now(),
+                    error: errorMsg,
+                  }
+                : t,
+            ),
+          );
+          pushNotification({
+            type: "agent-stuck",
+            title: `${task.agentName} background task failed`,
+            body: errorMsg,
+            agentName: task.agentName,
+            agentColor: agents.find((a) => a.id === task.agentId)?.color,
+          });
+        });
+    },
+    [agents, updateAgent, pushNotification],
+  );
+
+  const handlePermissionNotification = useCallback(
+    (agentName: string, request: PermissionRequest) => {
+      pushNotification({
+        type: "approval",
+        title: `${agentName} needs approval`,
+        body: `${request.tool}: ${request.description}`,
+        agentName,
+        agentColor: agents.find((a) => a.name === agentName)?.color,
+        permissionReqId: request.reqId,
+        permissionTool: request.tool,
+        permissionDesc: request.description,
+      });
+      if (getSoundsEnabled()) playApprovalNeeded();
+      showDesktopNotification(
+        `${agentName} needs approval`,
+        `${request.tool}: ${request.description}`,
+      );
+    },
+    [agents, pushNotification],
+  );
 
   function handleNewProject() {
-    if (!window.confirm('Start a new project? This will clear all chat history, tasks, and working context. Agents and skills will be kept.')) return;
+    if (
+      !window.confirm(
+        "Start a new project? This will clear all chat history, tasks, and working context. Agents and skills will be kept.",
+      )
+    )
+      return;
     const cleared = resetProject(agents);
-    
+
     setAgents(cleared);
     setSelectedAgentId(null);
     setInstructionRuns([]);
-    setRightPanel('chat');
+    setRightPanel("chat");
     // Prompt for a new working directory
     setShowWorkspacePicker(true);
   }
 
   async function handleWorkspaceSelected(dir: string) {
     setWorkspaceDir(dir);
-    localStorage.setItem('outworked_workspace_dir', dir);
+    localStorage.setItem("outworked_workspace_dir", dir);
     await setWorkspace(dir);
     watchProjectAgents(dir);
     setShowWorkspacePicker(false);
-    // Re-sync to pick up project-level agents
-    const synced = await syncClaudeSubagents(agents, dir);
-    if (synced !== agents) setAgents(synced);
+    // Drop auto-created agents when switching projects and delete their .md files
+    const autoAgents = agents.filter((a) => a.autoCreated);
+    for (const a of autoAgents) {
+      if (a.subagentFile) deleteClaudeAgentFile(a.subagentFile);
+    }
+    const withoutAuto = agents.filter((a) => !a.autoCreated);
+    setAgents(withoutAuto);
+    // Reload from disk to pick up project-level agents for the new workspace
+    const fresh = await loadAgentsFromDisk(dir);
+    setAgents(fresh);
     // Re-check permissions for the new workspace
     setPermsDismissed(false);
     try {
-      const { settings } = await readClaudeSettings('project');
+      const { settings } = await readClaudeSettings("project");
       const perms = settings.permissions || { allow: [], deny: [] };
-      const empty = (!perms.allow || perms.allow.length === 0) && (!perms.deny || perms.deny.length === 0);
+      const empty =
+        (!perms.allow || perms.allow.length === 0) &&
+        (!perms.deny || perms.deny.length === 0);
       setPermsEmpty(empty);
     } catch {
       setPermsEmpty(true);
@@ -435,11 +678,15 @@ export default function App() {
 
   return (
     <div className="flex h-screen bg-slate-950 text-slate-100 overflow-hidden">
-      <div className="sr-only" aria-live="polite">Workspace loaded</div>
+      <div className="sr-only" aria-live="polite">
+        Workspace loaded
+      </div>
       <aside className="w-56 shrink-0 border-r border-slate-700 flex flex-col bg-slate-900/95">
         <div className="px-3 py-3 border-b border-gray-800">
           <h1 className="text-xs font-pixel text-indigo-300">Outworked</h1>
-          <p className="text-[10px] font-pixel text-slate-400 mt-1">AI Agent HQ</p>
+          <p className="text-[10px] font-pixel text-slate-400 mt-1">
+            AI Agent HQ
+          </p>
         </div>
         {/* Claude Code status + sync */}
         <ClaudeCodeStatus />
@@ -449,8 +696,12 @@ export default function App() {
             onClick={() => setShowWorkspacePicker(true)}
             className="px-2 py-1 border-b border-gray-800 text-left hover:bg-slate-800/50 transition-colors group"
           >
-            <p className="text-[9px] font-pixel text-slate-500 group-hover:text-slate-400">📂 Project Dir</p>
-            <p className="text-[10px] font-mono text-slate-400 group-hover:text-slate-300 truncate">{workspaceDir}</p>
+            <p className="text-[9px] font-pixel text-slate-500 group-hover:text-slate-400">
+              📂 Project Dir
+            </p>
+            <p className="text-[10px] font-mono text-slate-400 group-hover:text-slate-300 truncate">
+              {workspaceDir}
+            </p>
           </button>
         )}
         <div className="flex-1 overflow-y-auto">
@@ -460,6 +711,7 @@ export default function App() {
             onSelect={handleAgentClick}
             onAdd={handleAddAgent}
             backgroundTasks={backgroundTasks}
+            onSaveAgent={handleSaveAutoAgent}
           />
           <SkillsPanel skills={skills} onUpdate={handleUpdateSkills} />
         </div>
@@ -471,29 +723,38 @@ export default function App() {
             onClick={() => {
               const next = !agentTeamsEnabled;
               setAgentTeamsEnabled(next);
-              localStorage.setItem('outworked_agent_teams', next ? '1' : '0');
+              localStorage.setItem("outworked_agent_teams", next ? "1" : "0");
             }}
-            className={`w-full btn-pixel text-[10px] ${agentTeamsEnabled ? 'bg-indigo-700 hover:bg-indigo-600 text-indigo-50' : 'bg-slate-700 hover:bg-slate-600 text-slate-200'}`}
+            className={`w-full btn-pixel text-[10px] ${agentTeamsEnabled ? "bg-indigo-700 hover:bg-indigo-600 text-indigo-50" : "bg-slate-700 hover:bg-slate-600 text-slate-200"}`}
           >
-            {agentTeamsEnabled ? '👥 Teams ON' : '👤 Teams OFF'}
+            {agentTeamsEnabled ? "👥 Teams ON" : "👤 Teams OFF"}
           </button>
           <NotificationCenter
             notifications={notifications}
-            onDismiss={(id) => setNotifications(prev => prev.map(n => n.id === id ? { ...n, read: true } : n))}
+            onDismiss={(id) =>
+              setNotifications((prev) =>
+                prev.map((n) => (n.id === id ? { ...n, read: true } : n)),
+              )
+            }
             onDismissAll={() => setNotifications([])}
             onApprovalResponse={async (notifId, reqId, allow) => {
-              await sendClaudeCodeInput(reqId, allow ? 'yes\n' : 'no\n');
-              setNotifications(prev => prev.map(n => n.id === notifId ? { ...n, read: true } : n));
+              await sendClaudeCodeInput(reqId, allow ? "yes\n" : "no\n");
+              setNotifications((prev) =>
+                prev.map((n) => (n.id === notifId ? { ...n, read: true } : n)),
+              );
             }}
             onNavigateToAgent={(name) => {
-              const a = agents.find(ag => ag.name === name);
-              if (a) { setSelectedAgentId(a.id); setRightPanel('chat'); }
+              const a = agents.find((ag) => ag.name === name);
+              if (a) {
+                setSelectedAgentId(a.id);
+                setRightPanel("chat");
+              }
             }}
           />
           <div className="flex gap-1.5">
             <button
               onClick={() => setShowPermsModal(true)}
-              className={`flex-1 btn-pixel text-[10px] ${permsEmpty && !permsDismissed ? 'bg-amber-700 hover:bg-amber-600 text-amber-50 animate-pulse' : 'bg-slate-700 hover:bg-slate-600 text-slate-200'}`}
+              className={`flex-1 btn-pixel text-[10px] ${permsEmpty && !permsDismissed ? "bg-amber-700 hover:bg-amber-600 text-amber-50 animate-pulse" : "bg-slate-700 hover:bg-slate-600 text-slate-200"}`}
             >
               🔒 Perms
             </button>
@@ -507,9 +768,9 @@ export default function App() {
           <div className="flex gap-1.5">
             <button
               onClick={toggleDebug}
-              className={`flex-1 btn-pixel text-[10px] ${debugMode ? 'bg-amber-700 hover:bg-amber-600 text-amber-50' : 'bg-slate-700 hover:bg-slate-600 text-slate-200'}`}
+              className={`flex-1 btn-pixel text-[10px] ${debugMode ? "bg-amber-700 hover:bg-amber-600 text-amber-50" : "bg-slate-700 hover:bg-slate-600 text-slate-200"}`}
             >
-              🐛 Debug {debugMode ? 'ON' : 'OFF'}
+              🐛 Debug {debugMode ? "ON" : "OFF"}
             </button>
             <button
               onClick={handleNewProject}
@@ -524,188 +785,268 @@ export default function App() {
       {/* ── Office (unified — includes Claude Code subagent employees) ── */}
       <>
         <main className="flex-1 relative overflow-hidden bg-slate-950">
-            <Suspense fallback={<div className="w-full h-full bg-gray-950" />}>
-              <OfficeCanvas
-                agents={agents}
-                selectedAgentId={selectedAgentId}
-                onAgentClick={handleAgentClick}
-              />
-            </Suspense>
-            {/* Orchestration complete toast */}
-            {orchToast && (
-              <div
-                className={`absolute top-3 left-1/2 -translate-x-1/2 z-20 rounded-lg border shadow-xl px-4 py-3 max-w-sm backdrop-blur-sm transition-all ${
-                  orchToast.failed === 0
-                    ? 'bg-emerald-950/90 border-emerald-500/50'
-                    : 'bg-amber-950/90 border-amber-500/50'
-                }`}
-              >
-                <div className="flex items-start gap-3">
-                  <span className="text-2xl mt-0.5">{orchToast.failed === 0 ? '✅' : '⚠️'}</span>
-                  <div className="flex-1 min-w-0">
-                    <p className={`text-[12px] font-pixel ${orchToast.failed === 0 ? 'text-emerald-200' : 'text-amber-200'}`}>
-                      {orchToast.failed === 0
-                        ? `All ${orchToast.success} task${orchToast.success !== 1 ? 's' : ''} complete!`
-                        : `${orchToast.success}/${orchToast.success + orchToast.failed} tasks complete`}
-                    </p>
-                    <p className="text-[10px] text-slate-400 mt-0.5 truncate">{orchToast.plan}</p>
-                    <div className="flex flex-wrap gap-1 mt-1.5">
-                      {orchToast.agents.map((name) => (
-                        <span key={name} className="text-[9px] font-pixel px-1.5 py-0.5 rounded bg-slate-800/80 text-slate-300 border border-slate-700/50">
-                          {name}
-                        </span>
-                      ))}
-                    </div>
-                  </div>
-                  <button
-                    onClick={() => setOrchToast(null)}
-                    className="text-slate-500 hover:text-white text-xs shrink-0"
-                  >
-                    ✕
-                  </button>
-                </div>
-              </div>
-            )}
-            <NotificationToast
-              notification={latestToast}
-              onDismiss={() => setLatestToast(null)}
+          <Suspense fallback={<div className="w-full h-full bg-gray-950" />}>
+            <OfficeCanvas
+              agents={agents}
+              selectedAgentId={selectedAgentId}
+              onAgentClick={handleAgentClick}
             />
-            <div className="absolute bottom-0 left-0 right-0 px-3 py-2 bg-slate-950/90 backdrop-blur-sm border-t border-slate-700 flex flex-col gap-1">
-              {/* Attention-needed agents (stuck / waiting) */}
-              {agents.filter((a) => a.status === 'stuck' || a.status === 'waiting-input' || a.status === 'waiting-approval').length > 0 && (
-                <div className="flex gap-3 overflow-x-auto">
-                  {agents.filter((a) => a.status === 'stuck' || a.status === 'waiting-input' || a.status === 'waiting-approval').map((a) => (
+          </Suspense>
+          {/* Orchestration complete toast */}
+          {orchToast && (
+            <div
+              className={`absolute top-3 left-1/2 -translate-x-1/2 z-20 rounded-lg border shadow-xl px-4 py-3 max-w-sm backdrop-blur-sm transition-all ${
+                orchToast.failed === 0
+                  ? "bg-emerald-950/90 border-emerald-500/50"
+                  : "bg-amber-950/90 border-amber-500/50"
+              }`}
+            >
+              <div className="flex items-start gap-3">
+                <span className="text-2xl mt-0.5">
+                  {orchToast.failed === 0 ? "✅" : "⚠️"}
+                </span>
+                <div className="flex-1 min-w-0">
+                  <p
+                    className={`text-[12px] font-pixel ${orchToast.failed === 0 ? "text-emerald-200" : "text-amber-200"}`}
+                  >
+                    {orchToast.failed === 0
+                      ? `All ${orchToast.success} task${orchToast.success !== 1 ? "s" : ""} complete!`
+                      : `${orchToast.success}/${orchToast.success + orchToast.failed} tasks complete`}
+                  </p>
+                  <p className="text-[10px] text-slate-400 mt-0.5 truncate">
+                    {orchToast.plan}
+                  </p>
+                  <div className="flex flex-wrap gap-1 mt-1.5">
+                    {orchToast.agents.map((name) => (
+                      <span
+                        key={name}
+                        className="text-[9px] font-pixel px-1.5 py-0.5 rounded bg-slate-800/80 text-slate-300 border border-slate-700/50"
+                      >
+                        {name}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+                <button
+                  onClick={() => setOrchToast(null)}
+                  className="text-slate-500 hover:text-white text-xs shrink-0"
+                >
+                  ✕
+                </button>
+              </div>
+            </div>
+          )}
+          <NotificationToast
+            notification={latestToast}
+            onDismiss={() => setLatestToast(null)}
+          />
+          <div className="absolute bottom-0 left-0 right-0 px-3 py-2 bg-slate-950/90 backdrop-blur-sm border-t border-slate-700 flex flex-col gap-1">
+            {/* Attention-needed agents (stuck / waiting) */}
+            {agents.filter(
+              (a) =>
+                a.status === "stuck" ||
+                a.status === "waiting-input" ||
+                a.status === "waiting-approval",
+            ).length > 0 && (
+              <div className="flex gap-3 overflow-x-auto">
+                {agents
+                  .filter(
+                    (a) =>
+                      a.status === "stuck" ||
+                      a.status === "waiting-input" ||
+                      a.status === "waiting-approval",
+                  )
+                  .map((a) => (
                     <button
                       key={a.id}
                       onClick={() => handleAgentClick(a)}
                       className={`flex items-center gap-1.5 shrink-0 px-2 py-0.5 rounded text-[10px] font-pixel border transition-colors ${
-                        a.status === 'stuck'
-                          ? 'bg-red-900/40 border-red-700/50 text-red-300 animate-pulse hover:bg-red-900/60'
-                          : a.status === 'waiting-approval'
-                          ? 'bg-amber-900/40 border-amber-700/50 text-amber-300 animate-pulse hover:bg-amber-900/60'
-                          : 'bg-orange-900/40 border-orange-700/50 text-orange-300 animate-pulse hover:bg-orange-900/60'
+                        a.status === "stuck"
+                          ? "bg-red-900/40 border-red-700/50 text-red-300 animate-pulse hover:bg-red-900/60"
+                          : a.status === "waiting-approval"
+                            ? "bg-amber-900/40 border-amber-700/50 text-amber-300 animate-pulse hover:bg-amber-900/60"
+                            : "bg-orange-900/40 border-orange-700/50 text-orange-300 animate-pulse hover:bg-orange-900/60"
                       }`}
                     >
-                      <span>{a.status === 'stuck' ? '⚠' : a.status === 'waiting-approval' ? '🔒' : '⏸'}</span>
+                      <span>
+                        {a.status === "stuck"
+                          ? "⚠"
+                          : a.status === "waiting-approval"
+                            ? "🔒"
+                            : "⏸"}
+                      </span>
                       <span style={{ color: a.color }}>{a.name}</span>
                       <span className="text-[9px] opacity-80">
-                        {a.status === 'stuck' ? 'Stuck' : a.status === 'waiting-approval' ? 'Needs approval' : 'Needs input'}
+                        {a.status === "stuck"
+                          ? "Stuck"
+                          : a.status === "waiting-approval"
+                            ? "Needs approval"
+                            : "Needs input"}
                       </span>
                     </button>
                   ))}
-                </div>
-              )}
-              {/* Active agents */}
-              <div className="flex gap-4 overflow-x-auto">
-                {agents.filter((a) => a.status !== 'idle' && a.status !== 'stuck' && a.status !== 'waiting-input' && a.status !== 'waiting-approval').map((a) => (
-                  <button key={a.id} onClick={() => handleAgentClick(a)} className="flex items-center gap-1.5 shrink-0 group hover:bg-slate-800/50 rounded px-1.5 py-0.5 transition-colors">
+              </div>
+            )}
+            {/* Active agents */}
+            <div className="flex gap-4 overflow-x-auto">
+              {agents
+                .filter(
+                  (a) =>
+                    a.status !== "idle" &&
+                    a.status !== "stuck" &&
+                    a.status !== "waiting-input" &&
+                    a.status !== "waiting-approval",
+                )
+                .map((a) => (
+                  <button
+                    key={a.id}
+                    onClick={() => handleAgentClick(a)}
+                    className="flex items-center gap-1.5 shrink-0 group hover:bg-slate-800/50 rounded px-1.5 py-0.5 transition-colors"
+                  >
                     <span className="relative flex h-2 w-2">
-                      <span className={`${a.status === 'background' ? '' : 'animate-ping'} absolute inline-flex h-full w-full rounded-full opacity-75`} style={{ backgroundColor: a.status === 'background' ? '#6366f1' : a.color }} />
-                      <span className="relative inline-flex rounded-full h-2 w-2" style={{ backgroundColor: a.status === 'background' ? '#6366f1' : a.color }} />
+                      <span
+                        className={`${a.status === "background" ? "" : "animate-ping"} absolute inline-flex h-full w-full rounded-full opacity-75`}
+                        style={{
+                          backgroundColor:
+                            a.status === "background" ? "#6366f1" : a.color,
+                        }}
+                      />
+                      <span
+                        className="relative inline-flex rounded-full h-2 w-2"
+                        style={{
+                          backgroundColor:
+                            a.status === "background" ? "#6366f1" : a.color,
+                        }}
+                      />
                     </span>
                     <span className="text-[10px] font-pixel text-slate-300">
-                      {a.status === 'background' && <span className="text-indigo-400 mr-1">[BG]</span>}
+                      {a.status === "background" && (
+                        <span className="text-indigo-400 mr-1">[BG]</span>
+                      )}
                       <span style={{ color: a.color }}>{a.name}</span>
                       {a.currentThought && (
                         <>
                           <span className="text-slate-600 mx-1">·</span>
-                          <span className="text-slate-400">{a.currentThought.slice(0, 60)}{a.currentThought.length > 60 ? '…' : ''}</span>
+                          <span className="text-slate-400">
+                            {a.currentThought.slice(0, 60)}
+                            {a.currentThought.length > 60 ? "…" : ""}
+                          </span>
                         </>
                       )}
                     </span>
                   </button>
                 ))}
-                {agents.every((a) => a.status === 'idle' || !a.currentThought) && (
-                  <span className="text-[10px] font-pixel text-slate-400">
-                    Click an employee to chat!
-                  </span>
-                )}
-              </div>
+              {agents.every(
+                (a) => a.status === "idle" || !a.currentThought,
+              ) && (
+                <span className="text-[10px] font-pixel text-slate-400">
+                  Click an employee to chat!
+                </span>
+              )}
             </div>
-          </main>
+          </div>
+        </main>
 
-      <aside className="w-80 shrink-0 border-l border-slate-700 flex flex-col bg-slate-900/95 overflow-hidden">
-        <PermissionsBanner workspace={workspaceDir} />
-        <div className="border-b border-gray-800">
-          {/* Row 1: global tabs — always visible */}
-          <div className="flex">
-            {(['chat', 'workspace', 'git', 'terminal'] as const).map((key) => {
-              const label = key === 'workspace' ? 'Files' : key === 'terminal' ? 'Term' : key === 'git' ? 'Git' : 'Chat';
-              return (
-                <button
-                  key={key}
-                  onClick={() => setRightPanel(key)}
-                  className={`flex-1 py-2 text-[10px] font-pixel leading-relaxed transition-colors ${rightPanel === key ? 'text-white border-b-2 border-indigo-500 bg-gray-800' : 'text-gray-500 hover:text-gray-300'}`}
-                >
-                  {label}
-                </button>
-              );
-            })}
-          </div>
-          {/* Row 2: agent-contextual tabs — only when an agent is selected */}
-          {selectedAgent && (
-            <div className="flex items-center border-t border-gray-800/50">
-              <span className="text-[10px] font-pixel text-slate-400 pl-2 pr-1 py-1.5 shrink-0 truncate max-w-[40%]" style={{ color: selectedAgent.color }}>{selectedAgent.name}</span>
-              {(['editor', 'tasks'] as const).map((key) => {
-                const label = key === 'editor' ? 'Config' : 'Tasks';
-                return (
-                  <button
-                    key={key}
-                    onClick={() => setRightPanel(key)}
-                    className={`flex-1 py-1.5 text-[10px] font-pixel leading-relaxed transition-colors ${rightPanel === key ? 'text-white border-b-2 border-indigo-500 bg-gray-800' : 'text-gray-500 hover:text-gray-300'}`}
-                  >
-                    {label}
-                  </button>
-                );
-              })}
+        <aside className="w-80 shrink-0 border-l border-slate-700 flex flex-col bg-slate-900/95 overflow-hidden">
+          <PermissionsBanner workspace={workspaceDir} />
+          <div className="border-b border-gray-800">
+            {/* Row 1: global tabs — always visible */}
+            <div className="flex">
+              {(["chat", "workspace", "git", "terminal"] as const).map(
+                (key) => {
+                  const label =
+                    key === "workspace"
+                      ? "Files"
+                      : key === "terminal"
+                        ? "Term"
+                        : key === "git"
+                          ? "Git"
+                          : "Chat";
+                  return (
+                    <button
+                      key={key}
+                      onClick={() => setRightPanel(key)}
+                      className={`flex-1 py-2 text-[10px] font-pixel leading-relaxed transition-colors ${rightPanel === key ? "text-white border-b-2 border-indigo-500 bg-gray-800" : "text-gray-500 hover:text-gray-300"}`}
+                    >
+                      {label}
+                    </button>
+                  );
+                },
+              )}
             </div>
-          )}
-        </div>
-        <div className="flex-1 overflow-hidden relative">
-          {rightPanel !== 'terminal' && rightPanel !== 'workspace' && rightPanel !== 'git' && (
-            rightPanel === 'chat' ? (
-              <ChatWindow
-                agent={selectedAgent}
-                agents={agents}
-                skills={skills}
-                onUpdateAgent={updateAgent}
-                onAddAgent={handleAddDynamicAgent}
-                agentTeamsEnabled={agentTeamsEnabled}
-                onOrchestrationDone={handleOrchestrationDone}
-                onPermissionNotification={handlePermissionNotification}
-                debugMode={debugMode}
-                backgroundTasks={backgroundTasks}
-                onStartBackgroundTask={handleStartBackgroundTask}
-              />
-            ) : rightPanel === 'editor' && selectedAgent ? (
-              <AgentEditor
-                agent={selectedAgent}
-                workspaceDir={workspaceDir || undefined}
-                onSave={handleSaveAgent}
-                onDelete={handleDeleteAgent}
-                onClose={() => setRightPanel('chat')}
-              />
-            ) : rightPanel === 'tasks' ? (
-              <AgentTasks
-                agent={selectedAgent}
-                onUpdateAgent={updateAgent}
-              />
-            ) : null
-          )}
-          {/* Workspace panel — always mounted to preserve watcher; hidden when not active */}
-          <div className={`absolute inset-0 ${rightPanel === 'workspace' ? '' : 'invisible pointer-events-none'}`}>
-            <WorkspacePanel workspaceDir={workspaceDir} />
+            {/* Row 2: agent-contextual tabs — only when an agent is selected */}
+            {selectedAgent && (
+              <div className="flex items-center border-t border-gray-800/50">
+                <span
+                  className="text-[10px] font-pixel text-slate-400 pl-2 pr-1 py-1.5 shrink-0 truncate max-w-[40%]"
+                  style={{ color: selectedAgent.color }}
+                >
+                  {selectedAgent.name}
+                </span>
+                {(["editor", "tasks"] as const).map((key) => {
+                  const label = key === "editor" ? "Config" : "Tasks";
+                  return (
+                    <button
+                      key={key}
+                      onClick={() => setRightPanel(key)}
+                      className={`flex-1 py-1.5 text-[10px] font-pixel leading-relaxed transition-colors ${rightPanel === key ? "text-white border-b-2 border-indigo-500 bg-gray-800" : "text-gray-500 hover:text-gray-300"}`}
+                    >
+                      {label}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
           </div>
-          {/* Git panel — always mounted to preserve state; hidden when not active */}
-          <div className={`absolute inset-0 ${rightPanel === 'git' ? '' : 'invisible pointer-events-none'}`}>
-            <GitPanel workspaceDir={workspaceDir} />
+          <div className="flex-1 overflow-hidden relative">
+            {rightPanel !== "terminal" &&
+              rightPanel !== "workspace" &&
+              rightPanel !== "git" &&
+              (rightPanel === "chat" ? (
+                <ChatWindow
+                  agent={selectedAgent}
+                  agents={agents}
+                  skills={skills}
+                  onUpdateAgent={updateAgent}
+                  onAddAgent={handleAddDynamicAgent}
+                  agentTeamsEnabled={agentTeamsEnabled}
+                  onOrchestrationDone={handleOrchestrationDone}
+                  onPermissionNotification={handlePermissionNotification}
+                  debugMode={debugMode}
+                  backgroundTasks={backgroundTasks}
+                  onStartBackgroundTask={handleStartBackgroundTask}
+                />
+              ) : rightPanel === "editor" && selectedAgent ? (
+                <AgentEditor
+                  agent={selectedAgent}
+                  workspaceDir={workspaceDir || undefined}
+                  onSave={handleSaveAgent}
+                  onDelete={handleDeleteAgent}
+                  onClose={() => setRightPanel("chat")}
+                />
+              ) : rightPanel === "tasks" ? (
+                <AgentTasks agent={selectedAgent} onUpdateAgent={updateAgent} />
+              ) : null)}
+            {/* Workspace panel — always mounted to preserve watcher; hidden when not active */}
+            <div
+              className={`absolute inset-0 ${rightPanel === "workspace" ? "" : "invisible pointer-events-none"}`}
+            >
+              <WorkspacePanel workspaceDir={workspaceDir} />
+            </div>
+            {/* Git panel — always mounted to preserve state; hidden when not active */}
+            <div
+              className={`absolute inset-0 ${rightPanel === "git" ? "" : "invisible pointer-events-none"}`}
+            >
+              <GitPanel workspaceDir={workspaceDir} />
+            </div>
+            {/* Terminal is always mounted to preserve shell session; hidden when not active */}
+            <div
+              className={`absolute inset-0 ${rightPanel === "terminal" ? "" : "invisible pointer-events-none"}`}
+            >
+              <TerminalPanel agents={agents} workspaceDir={workspaceDir} />
+            </div>
           </div>
-          {/* Terminal is always mounted to preserve shell session; hidden when not active */}
-          <div className={`absolute inset-0 ${rightPanel === 'terminal' ? '' : 'invisible pointer-events-none'}`}>
-            <TerminalPanel agents={agents} workspaceDir={workspaceDir} />
-          </div>
-        </div>
-      </aside>
+        </aside>
       </>
 
       {showWorkspacePicker && (
@@ -725,27 +1066,59 @@ export default function App() {
       )}
 
       {showPermsModal && workspaceDir && (
-        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50" onClick={() => setShowPermsModal(false)}>
-          <div className="bg-slate-800 border border-slate-600 rounded-lg w-[480px] max-h-[80vh] shadow-xl flex flex-col" onClick={e => e.stopPropagation()}>
+        <div
+          className="fixed inset-0 bg-black/60 flex items-center justify-center z-50"
+          onClick={() => setShowPermsModal(false)}
+        >
+          <div
+            className="bg-slate-800 border border-slate-600 rounded-lg w-[480px] max-h-[80vh] shadow-xl flex flex-col"
+            onClick={(e) => e.stopPropagation()}
+          >
             <div className="flex items-center justify-between px-4 py-3 border-b border-slate-700">
-              <h3 className="text-sm font-pixel text-white">🔒 Permissions & Config</h3>
-              <button onClick={() => setShowPermsModal(false)} className="text-slate-400 hover:text-white text-sm">✕</button>
+              <h3 className="text-sm font-pixel text-white">
+                🔒 Permissions & Config
+              </h3>
+              <button
+                onClick={() => setShowPermsModal(false)}
+                className="text-slate-400 hover:text-white text-sm"
+              >
+                ✕
+              </button>
             </div>
             <div className="flex-1 overflow-y-auto">
-              <PermissionsPanel workspace={workspaceDir} onSaved={() => setPermsEmpty(false)} />
+              <PermissionsPanel
+                workspace={workspaceDir}
+                onSaved={() => setPermsEmpty(false)}
+              />
             </div>
           </div>
         </div>
       )}
 
       {showCostsModal && (
-        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50" onClick={() => setShowCostsModal(false)}>
-          <div className="bg-slate-800 border border-slate-600 rounded-lg w-[480px] max-h-[80vh] shadow-xl flex flex-col" onClick={e => e.stopPropagation()}>
+        <div
+          className="fixed inset-0 bg-black/60 flex items-center justify-center z-50"
+          onClick={() => setShowCostsModal(false)}
+        >
+          <div
+            className="bg-slate-800 border border-slate-600 rounded-lg w-[480px] max-h-[80vh] shadow-xl flex flex-col"
+            onClick={(e) => e.stopPropagation()}
+          >
             <div className="flex items-center justify-between px-4 py-3 border-b border-slate-700">
-              <h3 className="text-sm font-pixel text-white">💰 Cost & Token Dashboard</h3>
-              <button onClick={() => setShowCostsModal(false)} className="text-slate-400 hover:text-white text-sm">✕</button>
+              <h3 className="text-sm font-pixel text-white">
+                💰 Cost & Token Dashboard
+              </h3>
+              <button
+                onClick={() => setShowCostsModal(false)}
+                className="text-slate-400 hover:text-white text-sm"
+              >
+                ✕
+              </button>
             </div>
-            <div className="flex-1 overflow-y-auto" style={{ minHeight: '400px' }}>
+            <div
+              className="flex-1 overflow-y-auto"
+              style={{ minHeight: "400px" }}
+            >
               <CostDashboard agents={agents} />
             </div>
           </div>
@@ -755,7 +1128,7 @@ export default function App() {
       {showOnboarding && startupDone && (
         <OnboardingModal
           onComplete={() => {
-            localStorage.setItem('outworked_onboarding_done', '1');
+            localStorage.setItem("outworked_onboarding_done", "1");
             setShowOnboarding(false);
           }}
           onOpenPerms={() => setShowPermsModal(true)}
@@ -768,11 +1141,19 @@ export default function App() {
           <div className="flex items-start gap-2">
             <span className="text-amber-400 text-sm mt-0.5">⚠</span>
             <div className="flex-1">
-              <p className="text-[11px] font-pixel text-amber-100">No permissions configured</p>
-              <p className="text-[10px] text-amber-300/70 mt-0.5">Set up allow/deny rules so Claude Code knows what tools it can use.</p>
+              <p className="text-[11px] font-pixel text-amber-100">
+                No permissions configured
+              </p>
+              <p className="text-[10px] text-amber-300/70 mt-0.5">
+                Set up allow/deny rules so Claude Code knows what tools it can
+                use.
+              </p>
               <div className="flex gap-2 mt-2">
                 <button
-                  onClick={() => { setShowPermsModal(true); setPermsDismissed(true); }}
+                  onClick={() => {
+                    setShowPermsModal(true);
+                    setPermsDismissed(true);
+                  }}
                   className="btn-pixel text-[10px] bg-amber-700 hover:bg-amber-600 text-white px-2 py-0.5"
                 >
                   Set Up Now
@@ -792,24 +1173,46 @@ export default function App() {
   );
 }
 
-function HirePromptModal({ onSubmit, onCancel }: { onSubmit: (desc: string) => void; onCancel: () => void }) {
-  const [value, setValue] = useState('');
+function HirePromptModal({
+  onSubmit,
+  onCancel,
+}: {
+  onSubmit: (desc: string) => void;
+  onCancel: () => void;
+}) {
+  const [value, setValue] = useState("");
   return (
-    <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50" onClick={onCancel}>
-      <div className="bg-slate-800 border border-slate-600 rounded-lg p-5 w-[420px] shadow-xl" onClick={e => e.stopPropagation()}>
-        <h3 className="text-sm font-pixel text-white mb-1">Hire New Employee</h3>
-        <p className="text-[11px] text-slate-400 mb-3">Describe the role and AI will generate a full agent definition.</p>
+    <div
+      className="fixed inset-0 bg-black/60 flex items-center justify-center z-50"
+      onClick={onCancel}
+    >
+      <div
+        className="bg-slate-800 border border-slate-600 rounded-lg p-5 w-[420px] shadow-xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h3 className="text-sm font-pixel text-white mb-1">
+          Hire New Employee
+        </h3>
+        <p className="text-[11px] text-slate-400 mb-3">
+          Describe the role and AI will generate a full agent definition.
+        </p>
         <input
           autoFocus
           value={value}
-          onChange={e => setValue(e.target.value)}
-          onKeyDown={e => { if (e.key === 'Enter' && value.trim()) onSubmit(value.trim()); if (e.key === 'Escape') onCancel(); }}
+          onChange={(e) => setValue(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && value.trim()) onSubmit(value.trim());
+            if (e.key === "Escape") onCancel();
+          }}
           placeholder='e.g. "frontend React developer", "DevOps engineer"'
           className="w-full input-mono text-[12px] mb-3"
         />
         <div className="flex gap-2 justify-end">
-          <button onClick={onCancel} className="btn-pixel bg-slate-700 hover:bg-slate-600 text-[11px]">Skip</button>
-          <button onClick={() => value.trim() ? onSubmit(value.trim()) : onCancel()} className="btn-pixel bg-emerald-700 hover:bg-emerald-600 text-[11px]">
+          {/* <button onClick={onCancel} className="btn-pixel bg-slate-700 hover:bg-slate-600 text-[11px]">Skip</button> */}
+          <button
+            onClick={() => (value.trim() ? onSubmit(value.trim()) : onCancel())}
+            className="btn-pixel bg-emerald-700 hover:bg-emerald-600 text-[11px]"
+          >
             ✨ Generate
           </button>
         </div>

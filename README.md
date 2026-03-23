@@ -49,8 +49,6 @@ On first launch, the onboarding modal will walk you through picking a workspace 
 | `npm run dev`            | Start Vite dev server (browser only, no Electron)                           |
 | `npm run electron:dev`   | Build and launch the full Electron app                                      |
 | `npm run electron:build` | Package distributable (dmg/zip on macOS, exe on Windows, AppImage on Linux) |
-| `npm run build`          | Vite production build                                                       |
-| `npm run lint`           | Run ESLint                                                                  |
 
 ## Tech Stack
 

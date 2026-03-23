@@ -1,51 +1,8 @@
 import { Agent, AgentSkill, SubagentDef, McpServerInline, AGENT_COLORS, SPRITE_KEYS } from './types';
-import { readClaudeAgentFiles, writeClaudeAgentFile, getHomedir, AgentFileInfo, runClaudeCode } from './terminal';
+import { readClaudeAgentFiles, writeClaudeAgentFile, getHomedir, AgentFileInfo, runClaudeCodeAdvanced } from './terminal';
 import { v4 as uuidv4 } from 'uuid';
 
-const AGENTS_KEY = 'outworked_agents';
 const SKILLS_KEY = 'outworked_skills';
-
-const DEFAULT_AGENTS: Agent[] = [
-  {
-    id: uuidv4(),
-    name: 'Boss',
-    role: 'Office Manager',
-    personality:
-      'You are the Boss, the office manager. Your ONLY role is delegation — you NEVER do implementation work yourself. You assign every task to the right employee using the Agent tool. You break complex requests into subtasks and delegate each one. You speak with authority but are fair and encouraging.',
-    model: 'claude-code',
-    provider: 'claude-code',
-    skills: [],
-    position: { x: 7, y: 1 },
-    status: 'idle',
-    currentThought: 'Overseeing the team...',
-    spriteKey: 'char_yellow',
-    history: [],
-    color: AGENT_COLORS[3],
-    todos: [],
-    isBoss: true,
-  },
-];
-
-export function loadAgents(): Agent[] {
-  if (typeof window === 'undefined') return DEFAULT_AGENTS;
-  try {
-    const raw = localStorage.getItem(AGENTS_KEY);
-    if (!raw) {
-      saveAgents(DEFAULT_AGENTS);
-      return DEFAULT_AGENTS;
-    }
-    return JSON.parse(raw) as Agent[];
-  } catch {
-    return DEFAULT_AGENTS;
-  }
-}
-
-export function saveAgents(agents: Agent[]): void {
-  if (typeof window === 'undefined') return;
-  // Strip message history from localStorage — sessions are persisted separately on disk
-  const light = agents.map(a => ({ ...a, history: [] }));
-  localStorage.setItem(AGENTS_KEY, JSON.stringify(light));
-}
 
 export function createAgent(partial: Partial<Agent>, claudeCodeDefault?: boolean): Agent {
   const idx = Math.floor(Math.random() * SPRITE_KEYS.length);
@@ -88,7 +45,6 @@ export function saveSkills(skills: AgentSkill[]): void {
 
 export function resetProject(agents: Agent[]): Agent[] {
   const cleared = agents.map((a) => ({ ...a, history: [], todos: [], status: 'idle' as const, currentThought: '', currentSessionId: undefined, sessionId: undefined }));
-  saveAgents(cleared);
   if (typeof window !== 'undefined') localStorage.removeItem('outworked_selected_agent');
   return cleared;
 }
@@ -97,13 +53,27 @@ export function resetProject(agents: Agent[]): Agent[] {
 
 /**
  * Build the markdown content for a Claude Code agent .md file.
+ * Takes the full Agent object and generates all outworked-* frontmatter fields.
  */
-export function buildSubagentMd(name: string, def: SubagentDef, body: string, outworkedName?: string, outworkedRole?: string): string {
+export function buildSubagentMd(agent: Agent, slug: string): string {
+  const def: SubagentDef = agent.subagentDef || { description: agent.role || 'Office assistant' };
+  const body = agent.personality || `You are ${agent.name}. ${def.description}`;
+
   let fm = '---\n';
-  fm += `name: ${name}\n`;
+
+  // Outworked metadata fields
+  fm += `outworked-id: ${agent.id}\n`;
+  fm += `outworked-name: ${agent.name}\n`;
+  fm += `outworked-role: ${agent.role}\n`;
+  fm += `outworked-position: ${agent.position.x},${agent.position.y}\n`;
+  fm += `outworked-sprite: ${agent.spriteKey}\n`;
+  fm += `outworked-color: ${agent.color}\n`;
+  if (agent.autoCreated) fm += `outworked-auto-created: true\n`;
+  if (agent.isBoss) fm += `outworked-boss: true\n`;
+
+  // Claude Code fields from subagentDef
+  fm += `name: ${slug}\n`;
   fm += `description: ${def.description}\n`;
-  if (outworkedName) fm += `outworked-name: ${outworkedName}\n`;
-  if (outworkedRole) fm += `outworked-role: ${outworkedRole}\n`;
   if (def.tools && def.tools.length > 0) {
     fm += 'tools:\n';
     for (const t of def.tools) fm += `  - ${t}\n`;
@@ -172,6 +142,10 @@ export async function createClaudeAgentFile(
   agent: Agent,
   workspaceDir?: string,
 ): Promise<string | null> {
+  // Assign an id if the agent doesn't have one (for migration)
+  if (!agent.id) {
+    agent = { ...agent, id: uuidv4() };
+  }
   const slug = agent.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '') || 'agent';
   const scope = agent.agentScope || 'user';
   let basePath: string;
@@ -181,11 +155,7 @@ export async function createClaudeAgentFile(
     basePath = `${getHomedir()}/.claude/agents`;
   }
   const filePath = `${basePath}/${slug}.md`;
-  const def: SubagentDef = agent.subagentDef || {
-    description: agent.role || 'Office assistant',
-  };
-  const body = agent.personality || `You are ${agent.name}. ${def.description}`;
-  const content = buildSubagentMd(slug, def, body, agent.name, agent.role);
+  const content = buildSubagentMd(agent, slug);
   const ok = await writeClaudeAgentFile(filePath, content);
   return ok ? filePath : null;
 }
@@ -201,6 +171,7 @@ export async function generateAgentWithAI(
     scope?: 'user' | 'project';
     workspaceDir?: string;
     onProgress?: (chunk: string) => void;
+    skipWrite?: boolean;
   } = {},
 ): Promise<{ content: string; filePath: string } | null> {
   const systemPrompt = `You are an expert at creating Claude Code agent definition files. Given a description of the desired agent, generate a complete .md file with YAML frontmatter and a detailed system prompt body.
@@ -222,24 +193,57 @@ Rules:
 - name is a kebab-case slug derived from the role
 - description is for Claude Code delegation routing — explain WHEN and WHY to use this agent
 - The body should be 200-500 words of detailed expertise and instructions
+- Do NOT use any tools — just output the raw .md file content as text
 - Do NOT wrap the output in markdown code fences — output the raw .md content directly
-- Do NOT include any explanation before or after the file content`;
+- Do NOT include any explanation before or after the file content
+- Your ENTIRE response must be the .md file content starting with --- and nothing else`;
 
   const prompt = opts.name
     ? `Create a Claude Code agent file for an employee named "${opts.name}" with this role/description: ${description}`
     : `Create a Claude Code agent file for this role/description: ${description}`;
 
   try {
-    const output = await runClaudeCode(prompt, systemPrompt, opts.workspaceDir, opts.onProgress);
+    // Use maxTurns: 1 to prevent Claude from using tools and force text-only output
+    let fullText = '';
+    const result = await runClaudeCodeAdvanced(
+      {
+        prompt,
+        systemPrompt,
+        cwd: opts.workspaceDir,
+        maxTurns: 1,
+      },
+      {
+        onTextDelta: (text) => {
+          fullText += text;
+          opts.onProgress?.(text);
+        },
+      },
+    );
+    const output = (result.result || fullText).trim();
 
     // Strip any accidental code fences the LLM might wrap around the output
-    let content = output.trim();
+    let content = output;
     if (content.startsWith('```')) {
       content = content.replace(/^```[a-z]*\n?/, '').replace(/\n?```$/, '').trim();
     }
 
+    // Try to extract frontmatter content from within the response
+    // (Claude may include preamble text before the --- block)
+    if (!content.startsWith('---')) {
+      const fmStart = content.indexOf('\n---\n');
+      if (fmStart !== -1) {
+        content = content.slice(fmStart + 1).trim();
+      } else {
+        const altStart = content.indexOf('---\n');
+        if (altStart > 0) {
+          content = content.slice(altStart).trim();
+        }
+      }
+    }
+
     // Validate we got valid frontmatter
     if (!content.startsWith('---')) {
+      console.warn('[generateAgentWithAI] Output did not contain valid frontmatter, got:', output.slice(0, 200));
       return null;
     }
 
@@ -256,6 +260,9 @@ Rules:
     }
     const filePath = `${basePath}/${slug}.md`;
 
+    if (opts.skipWrite) {
+      return { content, filePath };
+    }
     const ok = await writeClaudeAgentFile(filePath, content);
     return ok ? { content, filePath } : null;
   } catch (err) {
@@ -264,28 +271,25 @@ Rules:
   }
 }
 
-// ─── Claude Code default upgrade ───────────────────────────────
-/**
- * When Claude Code is available, upgrade default agents (non-subagent) to use
- * claude-code as their model/provider so they run through the CLI.
- */
-export function upgradeAgentsToClaudeCode(agents: Agent[]): Agent[] {
-  const upgraded = agents.map(a => {
-    // Skip agents already on claude-code or backed by subagent files
-    if (a.provider === 'claude-code' || a.subagentFile) return a;
-    return { ...a, model: 'claude-code' as const, provider: 'claude-code' as const };
-  });
-  saveAgents(upgraded);
-  return upgraded;
-}
-
-// ─── Claude Code subagent sync ─────────────────────────────────
-
 /**
  * Parse YAML frontmatter from a Claude Code subagent .md file.
  * Returns the parsed SubagentDef + the markdown body (prompt).
  */
-export function parseSubagentFrontmatter(content: string): { def: Partial<SubagentDef> & { name?: string; description?: string; 'outworked-name'?: string; 'outworked-role'?: string }; body: string } {
+export function parseSubagentFrontmatter(content: string): {
+  def: Partial<SubagentDef> & {
+    name?: string;
+    description?: string;
+    'outworked-id'?: string;
+    'outworked-name'?: string;
+    'outworked-role'?: string;
+    'outworked-position'?: string;
+    'outworked-sprite'?: string;
+    'outworked-color'?: string;
+    'outworked-auto-created'?: boolean;
+    'outworked-boss'?: boolean;
+  };
+  body: string;
+} {
   const trimmed = content.trimStart();
   if (!trimmed.startsWith('---')) {
     return { def: {}, body: content };
@@ -363,8 +367,14 @@ export function parseSubagentFrontmatter(content: string): { def: Partial<Subage
       isolation: raw.isolation as SubagentDef['isolation'] | undefined,
       mcpServers,
       hooks,
+      'outworked-id': raw['outworked-id'] as string | undefined,
       'outworked-name': raw['outworked-name'] as string | undefined,
       'outworked-role': raw['outworked-role'] as string | undefined,
+      'outworked-position': raw['outworked-position'] as string | undefined,
+      'outworked-sprite': raw['outworked-sprite'] as string | undefined,
+      'outworked-color': raw['outworked-color'] as string | undefined,
+      'outworked-auto-created': raw['outworked-auto-created'] === true || raw['outworked-auto-created'] === 'true' ? true : undefined,
+      'outworked-boss': raw['outworked-boss'] === true || raw['outworked-boss'] === 'true' ? true : undefined,
     },
     body,
   };
@@ -541,40 +551,64 @@ function stripQuotes(val: string): string {
   return val;
 }
 
+// ─── Disk-based agent loading / saving ─────────────────────────
+
+const DEFAULT_BOSS_PERSONALITY =
+  'You are the Boss, the office manager. Your ONLY role is delegation — you NEVER do implementation work yourself. You assign every task to the right employee using the Agent tool. You break complex requests into subtasks and delegate each one. You speak with authority but are fair and encouraging.';
+
 /**
- * Sync Claude Code subagent .md files into the office agent list.
- * Preserves existing manual agents and updates subagent-backed ones.
- * Returns the merged agent list.
+ * Load all agents from Claude Code .md files on disk.
+ * This is the single source of truth — localStorage is not used for agents.
  */
-export async function syncClaudeSubagents(existingAgents: Agent[], workspaceDir?: string): Promise<Agent[]> {
+export async function loadAgentsFromDisk(workspaceDir?: string): Promise<Agent[]> {
   let files: AgentFileInfo[];
   try {
     files = await readClaudeAgentFiles(workspaceDir);
   } catch {
-    return existingAgents; // Not in Electron or no claude CLI
-  }
-  if (files.length === 0) return existingAgents;
-
-  // Build a map of existing subagent-backed agents by their file path
-  const byFile = new Map<string, Agent>();
-  for (const a of existingAgents) {
-    if (a.subagentFile) byFile.set(a.subagentFile, a);
+    files = [];
   }
 
-  const manual = existingAgents.filter(a => !a.subagentFile);
-  const synced: Agent[] = [];
-  let colorIdx = manual.length;
+  const agents: Agent[] = [];
+  // Track which files were missing outworked-id so we can rewrite them
+  const filesToRewrite: { agent: Agent; slug: string; filePath: string }[] = [];
 
-  for (const file of files) {
+  for (let i = 0; i < files.length; i++) {
+    const file = files[i];
     const { def, body } = parseSubagentFrontmatter(file.content);
-    // outworked-name / outworked-role are our display fields;
-    // fall back to Claude Code's name / description
-    const name = def['outworked-name'] || def.name || file.file.replace(/\.md$/, '');
-    const description = def['outworked-role'] || def.description || 'Claude Code Subagent';
 
-    // Build the SubagentDef for runtime use
+    // Resolve outworked display fields
+    const name = def['outworked-name'] || def.name || file.file.replace(/\.md$/, '');
+    const role = def['outworked-role'] || def.description || 'Claude Code Subagent';
+    const personality = body || `You are ${name}. ${role}`;
+    const isBoss = !!def['outworked-boss'];
+    const autoCreated = !!def['outworked-auto-created'];
+    console.log(`[loadAgentsFromDisk] ${file.file}: autoCreated=${autoCreated}, raw=${def['outworked-auto-created']}, boss=${isBoss}`);
+
+    // Resolve id — generate one if missing
+    const hadId = !!def['outworked-id'];
+    const id = def['outworked-id'] || uuidv4();
+
+    // Resolve position
+    let position: { x: number; y: number };
+    const posStr = def['outworked-position'];
+    if (posStr && /^\d+,\d+$/.test(posStr)) {
+      const [px, py] = posStr.split(',').map(Number);
+      position = { x: px, y: py };
+    } else {
+      position = {
+        x: Math.floor(Math.random() * 10) + 2,
+        y: Math.floor(Math.random() * 6) + 2,
+      };
+    }
+
+    // Resolve sprite and color — use index as fallback
+    const idx = i % SPRITE_KEYS.length;
+    const spriteKey = def['outworked-sprite'] || SPRITE_KEYS[idx];
+    const color = def['outworked-color'] || AGENT_COLORS[idx];
+
+    // Build subagentDef
     const subagentDef: SubagentDef = {
-      description,
+      description: role,
       prompt: body || undefined,
       tools: def.tools,
       disallowedTools: def.disallowedTools,
@@ -589,53 +623,121 @@ export async function syncClaudeSubagents(existingAgents: Agent[], workspaceDir?
       hooks: def.hooks,
     };
 
-    const existing = byFile.get(file.path);
-    if (existing) {
-      // Update existing subagent agent — preserve history, position, sprite
-      synced.push({
-        ...existing,
-        name,
-        role: description,
-        personality: body || existing.personality,
-        subagentDef,
-        subagentFile: file.path,
-        agentScope: file.scope,
-      });
-    } else {
-      // Create new office agent from subagent file
-      const idx = colorIdx % SPRITE_KEYS.length;
-      colorIdx++;
-      synced.push({
-        id: uuidv4(),
-        name,
-        role: description,
-        personality: body || `You are ${name}, a Claude Code subagent. ${description}`,
-        model: 'claude-code',
-        provider: 'claude-code',
-        skills: [],
-        position: {
-          x: Math.floor(Math.random() * 10) + 2,
-          y: Math.floor(Math.random() * 6) + 2,
-        },
-        status: 'idle',
-        currentThought: '',
-        spriteKey: SPRITE_KEYS[idx],
-        history: [],
-        color: AGENT_COLORS[idx],
-        todos: [],
-        subagentFile: file.path,
-        subagentDef,
-        agentScope: file.scope,
-      });
+    const agent: Agent = {
+      id,
+      name,
+      role,
+      personality,
+      model: 'claude-code',
+      provider: 'claude-code',
+      skills: [],
+      position,
+      spriteKey,
+      color,
+      isBoss,
+      autoCreated,
+      subagentFile: file.path,
+      subagentDef,
+      agentScope: file.scope,
+      // Ephemeral defaults
+      status: 'idle',
+      currentThought: '',
+      history: [],
+      todos: [],
+    };
+
+    agents.push(agent);
+
+    // Queue file rewrite if it was missing outworked-id
+    if (!hadId) {
+      const slug = def.name || file.file.replace(/\.md$/, '');
+      filesToRewrite.push({ agent, slug, filePath: file.path });
     }
   }
 
-  // Merge: manual agents first, then synced subagents
-  const result = [...manual, ...synced];
-  saveAgents(result);
-  return result;
+  // Rewrite files that were missing outworked-id
+  for (const { agent, slug, filePath } of filesToRewrite) {
+    const content = buildSubagentMd(agent, slug);
+    await writeClaudeAgentFile(filePath, content);
+  }
+
+  // Ensure there is exactly one Boss agent; create boss.md if none found
+  const hasBoss = agents.some(a => a.isBoss);
+  if (!hasBoss) {
+    const bossIdx = 3 % SPRITE_KEYS.length; // yellow by default
+    const bossAgent: Agent = createAgent(
+      {
+        name: 'Boss',
+        role: 'Office Manager',
+        personality: DEFAULT_BOSS_PERSONALITY,
+        model: 'claude-code',
+        provider: 'claude-code',
+        position: { x: 7, y: 1 },
+        spriteKey: SPRITE_KEYS[bossIdx],
+        color: AGENT_COLORS[bossIdx],
+        isBoss: true,
+        agentScope: 'user',
+      },
+      true,
+    );
+
+    const bossFilePath = await createClaudeAgentFile(bossAgent, workspaceDir);
+    if (bossFilePath) {
+      agents.unshift({ ...bossAgent, subagentFile: bossFilePath });
+    } else {
+      // Even if writing failed, include the boss in memory
+      agents.unshift(bossAgent);
+    }
+  }
+
+  return agents;
 }
 
+/**
+ * Save an agent back to its .md file on disk.
+ * Uses agent.subagentFile for the path; falls back to createClaudeAgentFile() if not set.
+ */
+export async function saveAgentToDisk(agent: Agent, workspaceDir?: string): Promise<void> {
+  if (!agent.subagentFile) {
+    await createClaudeAgentFile(agent, workspaceDir);
+    return;
+  }
+
+  const slug = agent.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '') || 'agent';
+  const content = buildSubagentMd(agent, slug);
+  await writeClaudeAgentFile(agent.subagentFile, content);
+}
+
+// ─── One-time localStorage migration ───────────────────────────
+
+/**
+ * Migrate agents from localStorage to .md files on disk.
+ * Returns true if migration was performed, false if nothing to migrate.
+ */
+export async function migrateLocalStorageAgents(workspaceDir?: string): Promise<boolean> {
+  if (typeof window === 'undefined') return false;
+
+  const raw = localStorage.getItem('outworked_agents');
+  if (!raw) return false;
+
+  let agents: Agent[];
+  try {
+    agents = JSON.parse(raw) as Agent[];
+  } catch {
+    localStorage.removeItem('outworked_agents');
+    return false;
+  }
+
+  // Write a .md file for each agent that doesn't already have one
+  for (const agent of agents) {
+    if (!agent.subagentFile) {
+      await createClaudeAgentFile(agent, workspaceDir);
+    }
+  }
+
+  localStorage.removeItem('outworked_agents');
+  return true;
+}
 
 export function makeAgentName() {
   const names = ['Alex', 'Sam', 'Charlie', 'Taylor', 'Jordan', 'Morgan', 'Casey', 'Riley', 'Jamie', 'Drew'];

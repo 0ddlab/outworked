@@ -440,10 +440,13 @@ export default function ChatWindow({ agent, agents, skills, onUpdateAgent, onAdd
           position: { x: Math.floor(Math.random() * 10) + 2, y: Math.floor(Math.random() * 6) + 2 },
           autoCreated: true,
         }, true);
+        // Set subagentFile BEFORE adding to state to prevent sync duplication
+        const filePath = await createClaudeAgentFile(newAgent, wsDir);
+        if (filePath) {
+          newAgent.subagentFile = filePath;
+        }
         newAgents.push(newAgent);
         onAddAgent(newAgent);
-        // Persist agent file so Claude Code can use it
-        createClaudeAgentFile(newAgent, wsDir);
       }
 
       const allEmployees = [...employees, ...newAgents];
