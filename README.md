@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/outworked/outworked/releases"><img src="https://img.shields.io/badge/version-0.1.7-green.svg" alt="Version" /></a>
+  <a href="https://github.com/outworked/outworked/releases"><img src="https://img.shields.io/badge/version-0.1.8-green.svg" alt="Version" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-GPL%203.0-blue.svg" alt="License: GPL-3.0" /></a>
   <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey.svg" alt="Platform" />
   <img src="https://img.shields.io/badge/electron-41-47848F.svg" alt="Electron" />
