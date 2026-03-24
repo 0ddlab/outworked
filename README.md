@@ -5,7 +5,7 @@
 <h1 align="center">Outworked</h1>
 
 <p align="center">
-  <strong>AI agent orchestration with an pixel office GUI.</strong>
+  <strong>Your AI dev team, visualized. Hire agents. Assign tasks. Watch them code.</strong>
 </p>
 
 <p align="center">
@@ -16,13 +16,24 @@
   <img src="https://img.shields.io/badge/react-19-61DAFB.svg" alt="React" />
 </p>
 
+<h3 align="center">Download it. Open it. Start building.</h3>
+<p align="center"><em>No build steps, no config, no API keys. Just a .dmg and your Claude Code login.</em></p>
+
 <p align="center">
-  Outworked turns AI agents into office employees you can see, click on, and manage.<br/>
-  Think <strong>Animal Crossing meets Claude Code</strong> — a cute pixel-art office where each agent has a desk, a personality, and real tasks to do.
+  <a href="https://github.com/outworked/outworked/releases/tag/v0.1.8">
+    <img src="https://img.shields.io/badge/Download_Latest_Release-v0.1.8-brightgreen?style=for-the-badge&logo=github" alt="Download Latest Release" />
+  </a>
 </p>
 
 <p align="center">
-  <a href="https://github.com/outworked/outworked/releases"><strong>Download</strong></a> ·
+  <strong>Animal Crossing meets Claude Code.</strong><br/>
+  A pixel-art office where AI agents have desks, personalities, and real code to ship.<br/>
+  Describe what you want built — Outworked breaks it into tasks, assigns agents, and lets you<br/>
+  watch them collaborate, edit files, and open PRs in real time.
+</p>
+
+<p align="center">
+  <a href="https://github.com/outworked/outworked/releases/"><strong>Download the Latest Release</strong></a> ·
   <a href="#how-it-works"><strong>How It Works</strong></a> ·
   <a href="#features"><strong>Features</strong></a> ·
   <a href="#skills"><strong>Skills</strong></a> ·
@@ -39,30 +50,36 @@
 
 ## How It Works
 
-1. **Hire agents** — Create employees with a name, role, personality, model, and sprite
-2. **Assign tasks** — Describe a goal in plain English; the orchestrator breaks it into subtasks and routes them to the right agents
-3. **Watch them work** — Agents walk to their desks, execute Claude Code sessions, edit files, run commands, and collaborate with each other in real time
-4. **Ship code** — Review changes in the built-in git panel, approve PRs, and merge — all without leaving the office
+1. **Hire agents** — Give each one a name, role, personality, model, and pixel sprite
+2. **Describe a goal** — Write what you want in plain English; the orchestrator breaks it into subtasks and routes them to the right agents automatically
+3. **Watch them work** — Agents walk to their desks, open Claude Code sessions, edit files, run commands, and talk to each other — all visible in the office
+4. **Ship code** — Review diffs in the built-in git panel, approve PRs, and merge without ever leaving the app
 
 ---
 
+## Why Outworked?
+
+Most AI coding tools give you a chat box. Outworked gives you an **office**.
+
+You don't just prompt one model — you build a team. A frontend agent, a backend agent, a reviewer. They work in parallel, talk to each other, and you can see all of it happening live in a pixel-art world. It's the most fun way to ship code with AI.
+
 ## Features
 
-- **Visual Office** — Phaser-powered pixel office where agents walk, sit, and collaborate in real time
-- **Agent Customization** — Give each agent a name, role, personality (system prompt), model, and sprite
-- **Task Orchestration** — Describe a goal; the router breaks it into tasks and assigns them to agents
+- **Pixel Office** — A Phaser-powered world where your agents walk, sit at desks, and collaborate — in real time
+- **Build a Team** — Give each agent a name, role, personality, model, and sprite. Mix Claude Opus for hard problems with Sonnet for fast ones
+- **Auto-Orchestration** — Describe a goal; the router breaks it into tasks and assigns them to the right agents
 - **Multi-Agent Collaboration** — Agents talk to each other via `[ASK:AgentName]` and a shared message bus
-- **Claude Code Integration** — Full tool access (Bash, Edit, Read, etc.) with session persistence
+- **Full Claude Code Power** — Every agent gets full tool access (Bash, Edit, Read, etc.) with persistent sessions
 - **Live Chat** — Markdown-rendered conversations with syntax-highlighted code blocks and diffs
-- **Git Panel** — View status, staged changes, branches, and create PRs without leaving the app
+- **Built-in Git** — View status, staged changes, branches, and create PRs without leaving the app
 - **File Browser** — Live-updating workspace tree that syncs as agents edit files
-- **Skills System** — Plug-in skills via `SKILL.md` files (GitHub, Whisper, Apple Notes, PDF, and more)
+- **Skills System** — Extend agents with plug-in `SKILL.md` files (GitHub, MCP servers, and more)
 - **Cost Dashboard** — Track tokens and spend per agent, session, and day
-- **Background Mode** — Agents continue working when minimized, with tray icon updates
+- **Background Mode** — Minimize and let agents keep working. Tray icon keeps you updated
 - **Parallel Processing** — Multiple agents tackle subtasks simultaneously
-- **Permissions & Safety** — Allowlists, directory restrictions, timeouts, audit logging, and approval prompts
-- **Desktop Notifications** — Get notified when tasks finish or agents need approval
-- **Amazing Soundtrack** — Because every office needs background music
+- **Safe by Default** — Approval gates, command allowlists, directory restrictions, timeouts, and full audit logging
+- **Desktop Notifications** — Get pinged when tasks finish or agents need approval
+- **Original Soundtrack** — Because every office needs a vibe
 
 ---
 
@@ -77,29 +94,36 @@ Each agent can run a different model — pair a fast model for simple tasks with
 
 ---
 
-## Install
+## Get Started in 2 Minutes
 
-Download the latest release from [**GitHub Releases**](https://github.com/outworked/outworked/releases):
+### 1. Download
+
+Grab the latest release for your platform:
+
+<p align="center">
+  <a href="https://github.com/outworked/outworked/releases"><strong>Download Outworked</strong></a>
+</p>
 
 | Platform | Format                        |
 | -------- | ----------------------------- |
 | macOS    | `.dmg` (drag to Applications) |
 
-### Prerequisites
+### 2. Prerequisites
 
-- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed and authenticated
+- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed and authenticated (your existing subscription covers usage — no separate API key needed)
 
-### From Source
+### 3. Launch and Hire Your First Agent
+
+On first launch, the onboarding modal walks you through picking a workspace and creating your first agent. You'll be watching pixel employees write code in under two minutes.
+
+### Build from Source
 
 ```bash
-# Requires Node.js v18+
 git clone https://github.com/outworked/outworked.git
 cd outworked
-npm install
+npm install         # Requires Node.js v18+
 npm run electron:dev
 ```
-
-On first launch, the onboarding modal will walk you through picking a workspace and creating your first agent.
 
 ---
 
@@ -218,7 +242,7 @@ Please open a discussion first for large changes so we can discuss the approach.
 <details>
 <summary><strong>Do I need a Claude API key?</strong></summary>
 
-No. Outworked uses Claude Code under the hood, so you just need Claude Code installed and authenticated. Your existing Claude Code subscription covers usage.
+Nope. Outworked runs on Claude Code, so your existing subscription covers everything. No extra keys or billing to set up.
 
 </details>
 
