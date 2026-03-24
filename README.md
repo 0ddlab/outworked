@@ -96,17 +96,18 @@ Each agent can run a different model — pair a fast model for simple tasks with
 
 ## Get Started in 2 Minutes
 
-### 1. Download
+### 1. Install
 
-Grab the latest release for your platform:
+**Homebrew (recommended)**
 
-<p align="center">
-  <a href="https://github.com/outworked/outworked/releases"><strong>Download Outworked</strong></a>
-</p>
+```bash
+brew tap outworked/tap
+brew install --cask outworked
+```
 
-| Platform              | File                          |
-| --------------------- | ----------------------------- |
-| macOS (Apple Silicon) | `.dmg` (drag to Applications) |
+**Manual download**
+
+Grab the latest `.dmg` from the [releases page](https://github.com/outworked/outworked/releases) and drag to Applications.
 
 ### 2. Prerequisites
 
