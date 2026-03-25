@@ -74,7 +74,8 @@ export type AgentStatus =
   | "waiting-approval"
   | "slow"
   | "stuck"
-  | "background";
+  | "background"
+  | "channel-message";
 
 export interface BackgroundTask {
   id: string;
@@ -161,6 +162,47 @@ export interface Agent {
   liveToolCalls?: { name: string; args: string; timestamp: number }[]; // tool calls in progress
   liveThinking?: string; // current thinking preview
 }
+
+// ─── Messaging Channels ─────────────────────────────────────────
+
+export interface ChannelMessage {
+  id?: number;
+  channelId: string;
+  direction: "inbound" | "outbound";
+  conversationId?: string;
+  sender?: string;
+  content: string;
+  metadata?: Record<string, unknown>;
+  timestamp: number;
+}
+
+export interface ChannelConfig {
+  id: string;
+  type: string; // 'imessage', 'slack'
+  name: string;
+  config: Record<string, unknown>;
+  status: "connected" | "disconnected" | "error";
+  createdAt: number;
+  updatedAt: number;
+}
+
+// ─── Triggers ───────────────────────────────────────────────────
+
+export interface Trigger {
+  id: string;
+  name: string;
+  enabled: boolean;
+  type: "message-pattern" | "skill-event" | "webhook" | "schedule";
+  pattern?: string;
+  channelId?: string;
+  senderAllowlist?: string[];
+  agentId: string;
+  prompt: string;
+  createdAt: number;
+  lastTriggeredAt?: number;
+  triggerCount: number;
+}
+
 // ─── Memory ─────────────────────────────────────────────────────
 
 export interface MemoryEntry {

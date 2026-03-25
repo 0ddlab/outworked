@@ -52,6 +52,7 @@ import PermissionsPanel, {
 import WorkspacePanel from "./components/WorkspacePanel";
 import GitPanel from "./components/GitPanel";
 import CostDashboard from "./components/CostDashboard";
+import ChannelsPanel from "./components/ChannelsPanel";
 import NotificationCenter, {
   NotificationToast,
 } from "./components/NotificationCenter";
@@ -153,6 +154,7 @@ export default function App() {
   } | null>(null);
   const [showPermsModal, setShowPermsModal] = useState(false);
   const [showCostsModal, setShowCostsModal] = useState(false);
+  const [showChannelsModal, setShowChannelsModal] = useState(false);
   const [permsEmpty, setPermsEmpty] = useState(false);
   const [permsDismissed, setPermsDismissed] = useState(false);
   const [debugMode, setDebugMode] = useState(false);
@@ -298,6 +300,64 @@ export default function App() {
   }, []);
 
   const selectedAgent = agents.find((a) => a.id === selectedAgentId) ?? null;
+
+  // ── Trigger / channel-message listener ──────────────────────────
+  const [pendingMessage, setPendingMessage] = useState<{
+    text: string;
+    nonce: string;
+  } | null>(null);
+
+  useEffect(() => {
+    if (!isElectron()) return;
+    const w = window as unknown as {
+      electronAPI?: {
+        db?: {
+          onTriggerFire?: (
+            cb: (data: {
+              triggerId: string;
+              triggerName: string;
+              agentId: string | null;
+              prompt: string;
+              context?: unknown;
+            }) => void,
+          ) => () => void;
+        };
+      };
+    };
+    const unsub = w.electronAPI?.db?.onTriggerFire?.((data) => {
+      // Find the target agent, fall back to boss
+      const targetAgent = data.agentId
+        ? agents.find((a) => a.id === data.agentId)
+        : agents.find((a) => a.isBoss);
+
+      if (!targetAgent) {
+        console.warn(
+          "[Trigger] No target agent found for trigger:",
+          data.triggerName,
+        );
+        return;
+      }
+
+      // Select the target agent and inject the prompt
+      setSelectedAgentId(targetAgent.id);
+      setRightPanel("chat");
+      setPendingMessage({ text: data.prompt, nonce: crypto.randomUUID() });
+
+      // Update agent status to show it's handling a channel message
+      setAgents((prev) =>
+        prev.map((a) =>
+          a.id === targetAgent.id
+            ? {
+                ...a,
+                status: "channel-message" as AgentStatus,
+                currentThought: `📨 ${data.triggerName}`,
+              }
+            : a,
+        ),
+      );
+    });
+    return unsub;
+  }, [agents]);
 
   // Hydrate session from disk when selecting an agent with a saved session but empty history
   useEffect(() => {
@@ -836,6 +896,12 @@ export default function App() {
           </div>
           <div className="flex gap-1.5">
             <button
+              onClick={() => setShowChannelsModal(true)}
+              className="flex-1 btn-pixel text-[10px] bg-slate-700 hover:bg-slate-600 text-slate-200"
+            >
+              💬 Channels
+            </button>
+            <button
               onClick={toggleDebug}
               className={`flex-1 btn-pixel text-[10px] ${debugMode ? "bg-amber-700 hover:bg-amber-600 text-amber-50" : "bg-slate-700 hover:bg-slate-600 text-slate-200"}`}
             >
@@ -1106,6 +1172,8 @@ export default function App() {
                 debugMode={debugMode}
                 backgroundTasks={backgroundTasks}
                 onStartBackgroundTask={handleStartBackgroundTask}
+                pendingMessage={pendingMessage}
+                onPendingMessageConsumed={() => setPendingMessage(null)}
               />
             </div>
             {/* Editor and Tasks — conditionally rendered (no persistent state to preserve) */}
@@ -1218,6 +1286,36 @@ export default function App() {
               style={{ minHeight: "400px" }}
             >
               <CostDashboard agents={agents} />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showChannelsModal && (
+        <div
+          className="fixed inset-0 bg-black/60 flex items-center justify-center z-50"
+          onClick={() => setShowChannelsModal(false)}
+        >
+          <div
+            className="bg-slate-800 border border-slate-600 rounded-lg w-[480px] max-h-[80vh] shadow-xl flex flex-col"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between px-4 py-3 border-b border-slate-700">
+              <h3 className="text-sm font-pixel text-white">
+                💬 Messaging Channels
+              </h3>
+              <button
+                onClick={() => setShowChannelsModal(false)}
+                className="text-slate-400 hover:text-white text-sm"
+              >
+                ✕
+              </button>
+            </div>
+            <div
+              className="flex-1 overflow-y-auto"
+              style={{ minHeight: "400px" }}
+            >
+              <ChannelsPanel />
             </div>
           </div>
         </div>

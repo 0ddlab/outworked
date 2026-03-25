@@ -17,6 +17,18 @@ function getDbAPI(): {
   memorySet: (scope: string, key: string, value: string) => Promise<unknown>;
   memorySearch: (scope: string, query?: string) => Promise<unknown[]>;
   memoryDelete: (scope: string, key: string) => Promise<boolean>;
+  channelListLive: () => Promise<
+    { id: string; type: string; name: string; status: string; errorMessage: string | null }[]
+  >;
+  channelSend: (
+    channelId: string,
+    conversationId: string,
+    content: string,
+  ) => Promise<{ ok: boolean; error?: string }>;
+  channelMessageList: (
+    channelId: string,
+    limit: number,
+  ) => Promise<{ direction: string; sender?: string; content: string; timestamp: number }[]>;
 } | null {
   const w = window as unknown as { electronAPI?: { db?: unknown } };
   return (w.electronAPI?.db as ReturnType<typeof getDbAPI>) ?? null;
@@ -304,6 +316,59 @@ export const AGENT_TOOLS: ToolDefinition[] = [
       required: ["title"],
     },
   },
+  {
+    name: "send_message",
+    description:
+      'Send a message through a connected messaging channel (iMessage, Slack, etc). Use list_channels first to see which channels are available and connected. For Slack threads, use "CHANNEL_ID:THREAD_TS" as the conversationId.',
+    parameters: {
+      type: "object",
+      properties: {
+        channelId: {
+          type: "string",
+          description:
+            "ID of the channel to send through (from list_channels)",
+        },
+        conversationId: {
+          type: "string",
+          description:
+            'Recipient identifier — phone number/email for iMessage, Slack channel ID, or "CHANNEL_ID:THREAD_TS" for threaded Slack replies',
+        },
+        content: {
+          type: "string",
+          description: "Message text to send",
+        },
+      },
+      required: ["channelId", "conversationId", "content"],
+    },
+  },
+  {
+    name: "list_channels",
+    description:
+      "List all configured messaging channels and their connection status. Use this to discover available channels before sending messages.",
+    parameters: {
+      type: "object",
+      properties: {},
+    },
+  },
+  {
+    name: "read_channel_messages",
+    description:
+      "Read recent messages from a messaging channel. Useful for checking what messages have been received or sent.",
+    parameters: {
+      type: "object",
+      properties: {
+        channelId: {
+          type: "string",
+          description: "ID of the channel to read messages from",
+        },
+        limit: {
+          type: "number",
+          description: "Maximum number of messages to return (default: 20)",
+        },
+      },
+      required: ["channelId"],
+    },
+  },
 ];
 
 export const BOSS_ASSIGN_TOOL: ToolDefinition = AGENT_TOOLS.find(
@@ -436,6 +501,45 @@ export async function executeTool(
       return deleted
         ? `Forgot: [${args.scope}] ${args.key}`
         : `Memory not found: [${args.scope}] ${args.key}`;
+    }
+    case "send_message": {
+      const db = getDbAPI();
+      if (!db) return "Error: database not available (not running in Electron)";
+      const result = await db.channelSend(
+        args.channelId,
+        args.conversationId,
+        args.content,
+      );
+      if (!result.ok)
+        return `Error sending message: ${result.error || "unknown error"}`;
+      return `Message sent via channel ${args.channelId} to ${args.conversationId}`;
+    }
+    case "list_channels": {
+      const db = getDbAPI();
+      if (!db) return "Error: database not available (not running in Electron)";
+      const channels = await db.channelListLive();
+      if (!channels || channels.length === 0)
+        return "No messaging channels configured. Ask the user to set up a channel (iMessage or Slack) in the Channels panel.";
+      return channels
+        .map(
+          (ch) =>
+            `[${ch.id}] ${ch.name} (${ch.type}) — ${ch.status}${ch.errorMessage ? ` (${ch.errorMessage})` : ""}`,
+        )
+        .join("\n");
+    }
+    case "read_channel_messages": {
+      const db = getDbAPI();
+      if (!db) return "Error: database not available (not running in Electron)";
+      const limit = parseInt(args.limit, 10) || 20;
+      const msgs = await db.channelMessageList(args.channelId, limit);
+      if (!msgs || msgs.length === 0)
+        return `No messages found for channel ${args.channelId}`;
+      return msgs
+        .map(
+          (m) =>
+            `[${m.direction}] ${m.sender ? m.sender + ": " : ""}${m.content.slice(0, 300)}${m.content.length > 300 ? "…" : ""} (${new Date(m.timestamp).toLocaleString()})`,
+        )
+        .join("\n");
     }
     default:
       return `Unknown tool: ${name}`;

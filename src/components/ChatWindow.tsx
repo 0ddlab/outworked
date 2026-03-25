@@ -57,6 +57,9 @@ interface ChatWindowProps {
     task: BackgroundTask,
     execute: () => Promise<{ reply: string; agent: Agent }>,
   ) => void;
+  /** Programmatically injected message (e.g. from a trigger). Consumed once. */
+  pendingMessage?: { text: string; nonce: string } | null;
+  onPendingMessageConsumed?: () => void;
 }
 
 const EMPTY_KEYS = { openai: "", anthropic: "", gemini: "", github: "" };
@@ -158,6 +161,8 @@ export default function ChatWindow({
   debugMode,
   backgroundTasks,
   onStartBackgroundTask,
+  pendingMessage,
+  onPendingMessageConsumed,
 }: ChatWindowProps) {
   const [input, setInput] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
@@ -180,6 +185,26 @@ export default function ChatWindow({
   const abortRef = useRef<AbortController | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const debugBottomRef = useRef<HTMLDivElement>(null);
+  const pendingNonceRef = useRef<string | null>(null);
+
+  // Auto-send programmatically injected messages (e.g. from triggers)
+  useEffect(() => {
+    if (
+      pendingMessage &&
+      pendingMessage.nonce !== pendingNonceRef.current &&
+      agent &&
+      !isStreaming
+    ) {
+      pendingNonceRef.current = pendingMessage.nonce;
+      setInput(pendingMessage.text);
+      onPendingMessageConsumed?.();
+      // Defer to next tick so input state is set before handleSend reads it
+      setTimeout(() => {
+        const sendBtn = document.getElementById("chat-send-btn");
+        sendBtn?.click();
+      }, 50);
+    }
+  }, [pendingMessage, agent, isStreaming]); // eslint-disable-line react-hooks/exhaustive-deps
 
   function addDebug(line: string) {
     const ts = new Date().toISOString().slice(11, 23);

@@ -184,6 +184,53 @@ contextBridge.exposeInMainWorld("electronAPI", {
         cumulativeInputTokens,
         cumulativeOutputTokens,
       ),
+
+    // Triggers
+    triggerCreate: (trigger) =>
+      ipcRenderer.invoke("db:trigger:create", trigger),
+    triggerList: () => ipcRenderer.invoke("db:trigger:list"),
+    triggerUpdate: (id, updates) =>
+      ipcRenderer.invoke("db:trigger:update", id, updates),
+    triggerDelete: (id) => ipcRenderer.invoke("db:trigger:delete", id),
+
+    // Channel configs
+    channelConfigSave: (config) =>
+      ipcRenderer.invoke("db:channel:configSave", config),
+    channelConfigList: () => ipcRenderer.invoke("db:channel:configList"),
+    channelConfigDelete: (id) =>
+      ipcRenderer.invoke("db:channel:configDelete", id),
+
+    // Channel messages
+    channelMessageSave: (msg) =>
+      ipcRenderer.invoke("db:channel:messageSave", msg),
+    channelMessageList: (channelId, limit) =>
+      ipcRenderer.invoke("db:channel:messageList", channelId, limit),
+
+    // Channel manager (lifecycle + messaging)
+    channelRegister: (config) => ipcRenderer.invoke("channel:register", config),
+    channelConnect: (id) => ipcRenderer.invoke("channel:connect", id),
+    channelDisconnect: (id) => ipcRenderer.invoke("channel:disconnect", id),
+    channelSend: (channelId, conversationId, content) =>
+      ipcRenderer.invoke("channel:send", channelId, conversationId, content),
+    channelListLive: () => ipcRenderer.invoke("channel:list"),
+    channelLoadAll: () => ipcRenderer.invoke("channel:loadAll"),
+
+    // Channel events
+    onChannelInbound: (cb) => {
+      const listener = (_event, msg) => cb(msg);
+      ipcRenderer.on("channel:inbound", listener);
+      return () => ipcRenderer.removeListener("channel:inbound", listener);
+    },
+
+    // Trigger events
+    onTriggerFire: (cb) => {
+      const listener = (_event, data) => cb(data);
+      ipcRenderer.on("trigger:fire", listener);
+      return () => ipcRenderer.removeListener("trigger:fire", listener);
+    },
+
+    // Trigger test
+    triggerTest: (triggerId) => ipcRenderer.invoke("trigger:test", triggerId),
   },
 
   // Session persistence

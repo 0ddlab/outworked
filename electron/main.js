@@ -2371,6 +2371,26 @@ app.whenReady().then(() => {
   setupAutoUpdater();
   createWindow();
 
+  // ─── Initialize channel manager, skill runtimes, and scheduler ──
+  try {
+    const channelManager = require("./channels/channel-manager");
+    channelManager.setupChannelIPC(ipcMain, mainWindow);
+  } catch (err) {
+    console.error("[channels] Failed to initialize:", err.message);
+  }
+
+  try {
+    const { triggerEngine, WebhookServer } = require("./triggers");
+    triggerEngine.setWindow(mainWindow);
+    triggerEngine.refreshPatterns();
+    triggerEngine.setupTriggerIPC(ipcMain);
+
+    const webhookServer = new WebhookServer();
+    webhookServer.start();
+  } catch (err) {
+    console.error("[triggers] Failed to initialize:", err.message);
+  }
+
   // On startup, ensure the default workspace is accessible
   try {
     ensureDirWritable(workspaceDir);
