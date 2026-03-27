@@ -168,9 +168,9 @@ export default function AgentEditor({
         </div>
         <button
           onClick={onClose}
-          className="text-slate-300 hover:text-white text-xs font-pixel transition-colors px-1"
+          className="text-slate-300 hover:text-white text-xs font-pixel transition-colors px-1 cursor-pointer uppercase"
         >
-          ✕
+          X
         </button>
       </div>
 

@@ -2284,10 +2284,10 @@ export default function ChatWindow({
                     e.stopPropagation();
                     handleDeleteSession(meta);
                   }}
-                  className="text-[9px] text-slate-700 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer shrink-0 px-1"
+                  className="text-[9px] text-slate-700 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer shrink-0 px-1 font-pixel uppercase"
                   title="Delete"
                 >
-                  ✕
+                  X
                 </span>
               </button>
             ))}

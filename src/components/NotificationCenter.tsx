@@ -76,9 +76,9 @@ export default function NotificationCenter({
                 )}
                 <button
                   onClick={() => setOpen(false)}
-                  className="text-slate-400 hover:text-white text-sm"
+                  className="text-slate-400 hover:text-white text-sm cursor-pointer font-pixel uppercase"
                 >
-                  ✕
+                  X
                 </button>
               </div>
             </div>
@@ -192,9 +192,9 @@ export default function NotificationCenter({
                     </div>
                     <button
                       onClick={() => onDismiss(n.id)}
-                      className="text-slate-600 hover:text-slate-300 text-[10px] shrink-0"
+                      className="text-slate-600 hover:text-slate-300 text-[10px] shrink-0 cursor-pointer font-pixel uppercase"
                     >
-                      ✕
+                      X
                     </button>
                   </div>
                 </div>
@@ -287,9 +287,9 @@ export function NotificationToast({
         </div>
         <button
           onClick={onDismiss}
-          className="text-slate-500 hover:text-white text-xs shrink-0"
+          className="text-slate-500 hover:text-white text-xs shrink-0 cursor-pointer font-pixel uppercase"
         >
-          ✕
+          X
         </button>
       </div>
     </div>

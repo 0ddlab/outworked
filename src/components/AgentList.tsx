@@ -112,7 +112,7 @@ export default function AgentList({
                 <button
                   key={agent.id}
                   onClick={() => onSelect(agent)}
-                  className={`w-full flex items-center gap-2.5 px-3 py-2 text-left transition-colors border-l-2 hover:bg-slate-800 ${
+                  className={`w-full flex items-center gap-2.5 px-3 py-2 text-left transition-colors border-l-2 hover:bg-slate-800 cursor-pointer ${
                     selectedAgentId === agent.id
                       ? "bg-slate-800"
                       : "bg-transparent"

@@ -837,7 +837,7 @@ export default function App() {
         {workspaceDir && (
           <button
             onClick={() => setShowWorkspacePicker(true)}
-            className="px-2 py-1 border-b border-gray-800 text-left hover:bg-slate-800/50 transition-colors group"
+            className="px-2 py-1 border-b border-gray-800 text-left hover:bg-slate-800/50 transition-colors group cursor-pointer"
           >
             <p className="text-[9px] font-pixel text-slate-500 group-hover:text-slate-400">
               📂 Project Dir
@@ -996,9 +996,9 @@ export default function App() {
                 </div>
                 <button
                   onClick={() => setOrchToast(null)}
-                  className="text-slate-500 hover:text-white text-xs shrink-0"
+                  className="text-slate-500 hover:text-white text-xs shrink-0 cursor-pointer font-pixel uppercase"
                 >
-                  ✕
+                  X
                 </button>
               </div>
             </div>
@@ -1150,7 +1150,7 @@ export default function App() {
                     <button
                       key={key}
                       onClick={() => setRightPanel(key)}
-                      className={`flex-1 py-2 text-[10px] font-pixel leading-relaxed transition-colors ${rightPanel === key ? "text-white border-b-2 border-indigo-500 bg-gray-800" : "text-gray-500 hover:text-gray-300"}`}
+                      className={`flex-1 py-2 text-[10px] font-pixel cursor-pointer leading-relaxed transition-colors ${rightPanel === key ? "text-white border-b-2 border-indigo-500 bg-gray-800" : "text-gray-500 hover:text-gray-300"}`}
                     >
                       {label}
                     </button>
@@ -1173,7 +1173,7 @@ export default function App() {
                     <button
                       key={key}
                       onClick={() => setRightPanel(key)}
-                      className={`flex-1 py-1.5 text-[10px] font-pixel leading-relaxed transition-colors ${rightPanel === key ? "text-white border-b-2 border-indigo-500 bg-gray-800" : "text-gray-500 hover:text-gray-300"}`}
+                      className={`flex-1 py-1.5 text-[10px] font-pixel leading-relaxed cursor-pointer transition-colors ${rightPanel === key ? "text-white border-b-2 border-indigo-500 bg-gray-800" : "text-gray-500 hover:text-gray-300"}`}
                     >
                       {label}
                     </button>
@@ -1274,9 +1274,9 @@ export default function App() {
               </h3>
               <button
                 onClick={() => setShowPermsModal(false)}
-                className="text-slate-400 hover:text-white text-sm"
+                className="text-slate-400 hover:text-white text-sm cursor-pointer font-pixel uppercase"
               >
-                ✕
+                X
               </button>
             </div>
             <div className="flex-1 overflow-y-auto">
@@ -1304,9 +1304,9 @@ export default function App() {
               </h3>
               <button
                 onClick={() => setShowCostsModal(false)}
-                className="text-slate-400 hover:text-white text-sm"
+                className="text-slate-400 hover:text-white text-sm cursor-pointer font-pixel uppercase"
               >
-                ✕
+                X
               </button>
             </div>
             <div
@@ -1334,9 +1334,9 @@ export default function App() {
               </h3>
               <button
                 onClick={() => setShowChannelsModal(false)}
-                className="text-slate-400 hover:text-white text-sm"
+                className="text-slate-400 hover:text-white text-sm cursor-pointer font-pixel uppercase"
               >
-                ✕
+                X
               </button>
             </div>
             <div
@@ -1356,7 +1356,10 @@ export default function App() {
             // Seed browser & scheduler as default global skills on first launch
             const existing = await loadGlobalSkillIds();
             if (existing.length === 0) {
-              await saveGlobalSkillIds(["bundled:browser", "bundled:scheduler"]);
+              await saveGlobalSkillIds([
+                "bundled:browser",
+                "bundled:scheduler",
+              ]);
               window.dispatchEvent(new Event("global-skills-changed"));
             }
             setShowOnboarding(false);

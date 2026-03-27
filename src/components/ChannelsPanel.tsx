@@ -854,9 +854,9 @@ function ChannelInfoModal({
           </h3>
           <button
             onClick={onClose}
-            className="text-slate-400 hover:text-white text-lg leading-none"
+            className="text-slate-400 hover:text-white text-lg leading-none cursor-pointer font-pixel uppercase"
           >
-            &times;
+            X
           </button>
         </div>
 

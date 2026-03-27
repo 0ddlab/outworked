@@ -466,9 +466,9 @@ export default function GitPanel({ workspaceDir }: GitPanelProps) {
             </button>
             <button
               onClick={() => setOverlay(null)}
-              className="text-slate-500 hover:text-white text-[10px]"
+              className="text-slate-500 hover:text-white text-[10px] cursor-pointer font-pixel uppercase"
             >
-              ✕
+              X
             </button>
           </div>
         </div>
@@ -616,9 +616,9 @@ export default function GitPanel({ workspaceDir }: GitPanelProps) {
                     setDiffFile(null);
                     setDiffContent("");
                   }}
-                  className="text-[10px] text-slate-500 hover:text-white ml-2 shrink-0"
+                  className="text-[10px] text-slate-500 hover:text-white ml-2 shrink-0 cursor-pointer font-pixel uppercase"
                 >
-                  ✕
+                  X
                 </button>
               </div>
               <div className="flex-1 overflow-auto">

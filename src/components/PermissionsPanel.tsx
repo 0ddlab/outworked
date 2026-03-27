@@ -84,10 +84,10 @@ function RulesEditor({
             </code>
             <button
               onClick={() => onChange(rules.filter((_, j) => j !== i))}
-              className="text-[10px] text-slate-600 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity"
+              className="text-[10px] text-slate-600 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer font-pixel uppercase"
               title="Remove"
             >
-              ✕
+              X
             </button>
           </div>
         ))}

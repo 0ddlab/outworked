@@ -306,13 +306,13 @@ export default function TerminalPanel({
       <div className="flex border-b border-slate-700 bg-slate-900">
         <button
           onClick={() => setMode("terminal")}
-          className={`flex-1 py-1.5 text-[11px] font-pixel transition-colors ${mode === "terminal" ? "text-green-400 border-b-2 border-green-500 bg-slate-800" : "text-slate-400 hover:text-slate-200"}`}
+          className={`flex-1 py-1.5 text-[11px] font-pixel cursor-pointer transition-colors ${mode === "terminal" ? "text-green-400 border-b-2 border-green-500 bg-slate-800" : "text-slate-400 hover:text-slate-200"}`}
         >
           {">"} Terminal
         </button>
         <button
           onClick={() => setMode("files")}
-          className={`flex-1 py-1.5 text-[11px] font-pixel transition-colors ${mode === "files" ? "text-green-400 border-b-2 border-green-500 bg-slate-800" : "text-slate-400 hover:text-slate-200"}`}
+          className={`flex-1 py-1.5 text-[11px] font-pixel cursor-pointer transition-colors ${mode === "files" ? "text-green-400 border-b-2 border-green-500 bg-slate-800" : "text-slate-400 hover:text-slate-200"}`}
         >
           📁 Files ({files.length})
         </button>
@@ -459,7 +459,9 @@ function FileTreeNode({
       setFileContent(null);
       return;
     }
-    readFile(node.path).then(setFileContent).catch(() => setFileContent(null));
+    readFile(node.path)
+      .then(setFileContent)
+      .catch(() => setFileContent(null));
   }, [isExpanded, node.path]);
 
   if (node.isDir) {
