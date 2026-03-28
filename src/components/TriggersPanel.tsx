@@ -72,7 +72,7 @@ const TRIGGER_TYPES = [
   // },
 ] as const;
 
-type TriggerType = (typeof TRIGGER_TYPES)[number]["value"];
+type TriggerType = Trigger["type"];
 
 const typeColors: Record<
   string,

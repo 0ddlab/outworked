@@ -296,6 +296,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   // Music
   music: {
     listTracks: () => ipcRenderer.invoke("music:listTracks"),
+    getReadme: () => ipcRenderer.invoke("music:getReadme"),
   },
 
   // Permissions

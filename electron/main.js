@@ -8,9 +8,12 @@ const {
   dialog,
   Notification,
   powerSaveBlocker,
+  net,
+  protocol,
 } = require("electron");
 const path = require("path");
 const fs = require("fs");
+const os = require("os");
 const { spawn, execSync, execFileSync } = require("child_process");
 const crypto = require("crypto");
 const { autoUpdater } = require("electron-updater");
@@ -1891,8 +1894,12 @@ function setupGitIPC() {
 }
 
 // ─── Music IPC ────────────────────────────────────────────────────
-function getMusicDir() {
+function getBundledMusicDir() {
   return path.join(__dirname, "..", "dist-renderer", "music");
+}
+
+function getUserMusicDir() {
+  return path.join(os.homedir(), ".outworked", "music");
 }
 
 /** Minimal ID3 tag parser – extracts title from ID3v2 (TIT2) or ID3v1 */
@@ -2099,24 +2106,75 @@ function setupPermissionsIPC() {
 }
 
 function setupMusicIPC() {
+  // Ensure ~/.outworked/music exists
+  const userMusicDir = getUserMusicDir();
+  fs.mkdirSync(userMusicDir, { recursive: true });
+
+  // Register protocol to serve user tracks from ~/.outworked/music
+  protocol.handle("user-music", (request) => {
+    const url = new URL(request.url);
+    // hostname + pathname covers paths like user-music://subdir/file.mp3
+    const relParts = [url.hostname, ...url.pathname.split("/")]
+      .filter(Boolean)
+      .map(decodeURIComponent);
+    const filePath = path.join(getUserMusicDir(), ...relParts);
+    return net.fetch(`file://${filePath}`);
+  });
+
+  const AUDIO_RE = /\.(mp3|wav|ogg|m4a|flac)$/i;
+  const MAX_DEPTH = 4;
+
+  function scanDir(baseDir, makeSrc, isUser) {
+    if (!fs.existsSync(baseDir)) return [];
+    const results = [];
+    function walk(dir, depth) {
+      if (depth > MAX_DEPTH) return;
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          walk(full, depth + 1);
+        } else if (AUDIO_RE.test(entry.name)) {
+          const rel = path.relative(baseDir, full);
+          const id3Title = readTitle(full);
+          const fallback = entry.name
+            .replace(/\.[^.]+$/i, "")
+            .replace(/[-_]/g, " ");
+          results.push({
+            file: entry.name,
+            title: id3Title || fallback,
+            src: makeSrc(rel),
+            user: isUser,
+          });
+        }
+      }
+    }
+    walk(baseDir, 0);
+    return results.sort((a, b) => a.title.localeCompare(b.title));
+  }
+
   ipcMain.handle("music:listTracks", () => {
-    const musicDir = getMusicDir();
-    if (!fs.existsSync(musicDir)) return [];
-    const files = fs
-      .readdirSync(musicDir)
-      .filter((f) => f.toLowerCase().endsWith(".mp3"))
-      .sort();
-    return files.map((f) => {
-      const absPath = path.join(musicDir, f);
-      const id3Title = readTitle(absPath);
-      const fallback = f.replace(/\.mp3$/i, "").replace(/[-_]/g, " ");
-      return { file: f, title: id3Title || fallback, src: `./music/${f}` };
-    });
+    const bundled = scanDir(
+      getBundledMusicDir(),
+      (rel) => `./music/${rel}`,
+      false,
+    );
+    const user = scanDir(
+      getUserMusicDir(),
+      (rel) =>
+        `user-music://${rel.split(path.sep).map(encodeURIComponent).join("/")}`,
+      true,
+    );
+    return [...bundled, ...user];
+  });
+
+  ipcMain.handle("music:getReadme", () => {
+    const mdPath = path.join(__dirname, "music", "music.md");
+    if (!fs.existsSync(mdPath)) return "";
+    return fs.readFileSync(mdPath, "utf-8");
   });
 }
 
 // ─── Session persistence ──────────────────────────────────────────
-const os = require("os");
 const SESSIONS_DIR = path.join(os.homedir(), ".outworked", "sessions");
 
 /**
@@ -2408,6 +2466,7 @@ function createWindow() {
             "font-src 'self' https://fonts.gstatic.com; " +
             "connect-src 'self' https://api.openai.com https://api.anthropic.com; " +
             "img-src 'self' data: blob:; " +
+            "media-src 'self' user-music:; " +
             "worker-src 'self' blob:;",
         ],
       },
@@ -2429,6 +2488,7 @@ function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      autoplayPolicy: "no-user-gesture-required",
       additionalArguments: [`--homedir=${require("os").homedir()}`],
     },
   });
@@ -2488,6 +2548,11 @@ function setupNotificationIPC() {
     return { ok: true };
   });
 }
+
+// Allow user-music:// to stream audio and be fetched from the renderer
+protocol.registerSchemesAsPrivileged([
+  { scheme: "user-music", privileges: { stream: true, supportFetchAPI: true } },
+]);
 
 app.whenReady().then(() => {
   // Set an explicit application menu to suppress macOS

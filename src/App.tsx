@@ -43,7 +43,7 @@ import ChatWindow, { OrchestrationDoneEvent } from "./components/ChatWindow";
 import TerminalPanel from "./components/TerminalPanel";
 import { InstructionRun } from "./components/OfficeInstructions";
 import AgentTasks from "./components/AgentTasks";
-import MusicPlayer from "./components/MusicPlayer";
+import MusicPlayer from "./components/music";
 import ClaudeCodeStatus from "./components/ClaudeCodeStatus";
 import UpdateBanner from "./components/UpdateBanner";
 import WorkspacePicker from "./components/WorkspacePicker";
