@@ -44,6 +44,13 @@ class SlackChannel extends BaseChannel {
           hint: "Optional — auto-detected on connect if omitted.",
           required: false,
         },
+        {
+          key: "respondOnlyWhenMentioned",
+          label: "Respond only when @mentioned",
+          type: "boolean",
+          hint: "When enabled, the bot only responds to messages that @mention it. When disabled, it responds to all messages.",
+          required: false,
+        },
       ],
     };
   }
@@ -62,6 +69,7 @@ class SlackChannel extends BaseChannel {
     this.botToken = config.botToken || "";
     this.channelIds = Array.isArray(config.channelIds) ? config.channelIds : [];
     this.appUserId = config.appUserId || "";
+    this.respondOnlyWhenMentioned = config.respondOnlyWhenMentioned || false;
 
     /**
      * Per-channel cursor tracking — maps channelId → ISO timestamp string of
@@ -74,6 +82,9 @@ class SlackChannel extends BaseChannel {
 
     /** @type {ReturnType<typeof setInterval> | null} */
     this._pollTimer = null;
+
+    /** Guard against overlapping polls */
+    this._polling = false;
   }
 
   // ─── Lifecycle ────────────────────────────────────────────────
@@ -167,6 +178,16 @@ class SlackChannel extends BaseChannel {
    * Poll all configured Slack channels for new messages.
    */
   async _pollAll() {
+    if (this._polling) return;
+    this._polling = true;
+    try {
+      await this._pollAllInner();
+    } finally {
+      this._polling = false;
+    }
+  }
+
+  async _pollAllInner() {
     for (const channelId of this.channelIds) {
       try {
         await this._pollChannel(channelId);
@@ -225,6 +246,12 @@ class SlackChannel extends BaseChannel {
       // Skip messages with no text content.
       const text = (msg.text || "").trim();
       if (!text) continue;
+
+      // If mention-only mode is on, skip messages that don't @mention the bot.
+      // Slack encodes mentions as <@U01234567> in the message text.
+      if (this.respondOnlyWhenMentioned && this.appUserId) {
+        if (!text.includes(`<@${this.appUserId}>`)) continue;
+      }
 
       const tsMs = Math.round(parseFloat(msg.ts) * 1000);
 

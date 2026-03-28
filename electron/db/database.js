@@ -208,6 +208,38 @@ const MIGRATIONS = [
       );
     `,
   },
+  {
+    version: 3,
+    description: "Add match_mode to triggers, make agent_id nullable",
+    up: `
+      CREATE TABLE triggers_new (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        type TEXT NOT NULL,
+        pattern TEXT,
+        match_mode TEXT DEFAULT 'contains',
+        channel_id TEXT,
+        sender_allowlist TEXT DEFAULT '[]',
+        agent_id TEXT,
+        prompt TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        last_triggered_at INTEGER,
+        trigger_count INTEGER NOT NULL DEFAULT 0
+      );
+      INSERT INTO triggers_new (id, name, enabled, type, pattern, match_mode,
+        channel_id, sender_allowlist, agent_id, prompt,
+        created_at, last_triggered_at, trigger_count)
+      SELECT
+        id, name, enabled, type, pattern, 'contains',
+        channel_id, sender_allowlist, agent_id, prompt,
+        created_at, last_triggered_at, trigger_count
+      FROM triggers;
+      DROP TABLE triggers;
+      ALTER TABLE triggers_new RENAME TO triggers;
+      CREATE INDEX IF NOT EXISTS idx_triggers_agent_id ON triggers(agent_id);
+    `,
+  },
 ];
 
 /**
@@ -809,8 +841,8 @@ function triggerCreate(trigger) {
   const db = getDb();
   db.prepare(
     `
-    INSERT INTO triggers (id, name, enabled, type, pattern, channel_id, sender_allowlist, agent_id, prompt, created_at, trigger_count)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+    INSERT INTO triggers (id, name, enabled, type, pattern, match_mode, channel_id, sender_allowlist, agent_id, prompt, created_at, trigger_count)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
   `,
   ).run(
     trigger.id,
@@ -818,9 +850,10 @@ function triggerCreate(trigger) {
     trigger.enabled ? 1 : 0,
     trigger.type,
     trigger.pattern || null,
+    trigger.matchMode || "contains",
     trigger.channelId || null,
     JSON.stringify(trigger.senderAllowlist || []),
-    trigger.agentId,
+    trigger.agentId || null,
     trigger.prompt,
     trigger.createdAt || Date.now(),
   );
@@ -845,6 +878,7 @@ const TRIGGER_COLUMN_MAP = {
   enabled: "enabled",
   type: "type",
   pattern: "pattern",
+  matchMode: "match_mode",
   channelId: "channel_id",
   senderAllowlist: "sender_allowlist",
   agentId: "agent_id",
@@ -895,6 +929,7 @@ function rowToTrigger(row) {
     enabled: !!row.enabled,
     type: row.type,
     pattern: row.pattern,
+    matchMode: row.match_mode || "contains",
     channelId: row.channel_id,
     senderAllowlist: JSON.parse(row.sender_allowlist || "[]"),
     agentId: row.agent_id,

@@ -281,6 +281,68 @@ const BUILTIN_TOOLS = [
       "List all available skills with their documentation and connection status. Use this to discover what capabilities (tools) are available to you and how to use them.",
     inputSchema: { type: "object", properties: {} },
   },
+  {
+    name: "create_trigger",
+    description:
+      'Create an event trigger that fires a prompt to an agent. Types: "message-pattern" (regex on channel messages), "skill-event" (listen for skill events), "webhook" (HTTP POST to localhost:7891/trigger/<id>). Use $1/$2 for regex captures or {{key}} for webhook/event placeholders in the prompt.',
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "Human-readable trigger name" },
+        type: {
+          type: "string",
+          enum: ["message-pattern", "skill-event", "webhook", "schedule"],
+          description: "Trigger type",
+        },
+        pattern: {
+          type: "string",
+          description: "Regex pattern (message-pattern) or event type (skill-event)",
+        },
+        channelId: { type: "string", description: "Scope to a channel (message-pattern only)" },
+        senderAllowlist: {
+          type: "string",
+          description: 'Comma-separated senders, or "*" for any (default: "*")',
+        },
+        agentId: { type: "string", description: "Target agent ID (omit for boss)" },
+        prompt: { type: "string", description: "Prompt template with $1/$2 or {{key}} placeholders" },
+        enabled: { type: "boolean", description: "Active state (default: true)" },
+      },
+      required: ["name", "type", "prompt"],
+    },
+  },
+  {
+    name: "list_triggers",
+    description: "List all configured triggers with their type, pattern, target agent, enabled status, and fire count.",
+    inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "update_trigger",
+    description: "Update an existing trigger's properties.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        triggerId: { type: "string", description: "Trigger ID to update" },
+        name: { type: "string" },
+        enabled: { type: "boolean" },
+        pattern: { type: "string" },
+        prompt: { type: "string" },
+        agentId: { type: "string" },
+        channelId: { type: "string" },
+      },
+      required: ["triggerId"],
+    },
+  },
+  {
+    name: "delete_trigger",
+    description: "Delete a trigger by ID.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        triggerId: { type: "string", description: "Trigger ID to delete" },
+      },
+      required: ["triggerId"],
+    },
+  },
 ];
 
 // ─── Skill documentation ─────────────────────────────────────────
@@ -493,6 +555,65 @@ async function executeTool(name, args) {
       }
       return lines.join("\n");
     }
+    case "create_trigger": {
+      const id = `trigger-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+      const allowlist = args.senderAllowlist
+        ? args.senderAllowlist.split(",").map((s) => s.trim()).filter(Boolean)
+        : ["*"];
+      db.triggerCreate({
+        id,
+        name: args.name,
+        enabled: args.enabled !== false,
+        type: args.type,
+        pattern: args.pattern || null,
+        channelId: args.channelId || null,
+        senderAllowlist: allowlist,
+        agentId: args.agentId || null,
+        prompt: args.prompt,
+        createdAt: Date.now(),
+      });
+      // Refresh trigger engine patterns
+      try {
+        const triggerEngine = require("../triggers/trigger-engine");
+        triggerEngine.refreshPatterns();
+      } catch { /* ignore if not loaded */ }
+      const webhookHint = args.type === "webhook"
+        ? `\nWebhook URL: POST http://127.0.0.1:7891/trigger/${id}`
+        : "";
+      return `Trigger created: [${id}] "${args.name}" (${args.type})${webhookHint}`;
+    }
+    case "list_triggers": {
+      const triggers = db.triggerList();
+      if (!triggers || triggers.length === 0) return "No triggers configured.";
+      return triggers
+        .map(
+          (t) =>
+            `[${t.id}] "${t.name}" (${t.type}) — ${t.enabled ? "enabled" : "disabled"} — ${t.triggerCount || 0}x fired${t.pattern ? ` — pattern: ${t.pattern}` : ""}${t.agentId ? ` — agent: ${t.agentId}` : " — agent: boss"}`,
+        )
+        .join("\n");
+    }
+    case "update_trigger": {
+      if (!args.triggerId) return "Error: triggerId is required";
+      const updates = {};
+      for (const [k, v] of Object.entries(args)) {
+        if (k !== "triggerId" && v !== undefined) updates[k] = v;
+      }
+      db.triggerUpdate(args.triggerId, updates);
+      try {
+        const triggerEngine = require("../triggers/trigger-engine");
+        triggerEngine.refreshPatterns();
+      } catch { /* ignore */ }
+      return `Trigger ${args.triggerId} updated.`;
+    }
+    case "delete_trigger": {
+      if (!args.triggerId) return "Error: triggerId is required";
+      db.triggerDelete(args.triggerId);
+      try {
+        const triggerEngine = require("../triggers/trigger-engine");
+        triggerEngine.refreshPatterns();
+      } catch { /* ignore */ }
+      return `Trigger ${args.triggerId} deleted.`;
+    }
     case "list_skills": {
       const sections = [];
 
@@ -546,7 +667,9 @@ async function handleMcpRequest(msg, agentId = null, allowedRuntimes = null) {
   const { id, method, params } = msg;
 
   verbose &&
-    console.log(`[mcp] Received request: ${method} with params:`, params);
+    console.log(
+      `[mcp] Received request: ${method} with agentId: ${agentId}, allowedRuntimes: ${allowedRuntimes}, params: ${JSON.stringify(params)}`,
+    );
 
   switch (method) {
     case "initialize":

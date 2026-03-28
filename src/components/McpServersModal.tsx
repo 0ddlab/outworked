@@ -262,7 +262,7 @@ export default function McpServersModal({
           <h2 className="text-xs font-pixel text-white">MCP Servers</h2>
           <button
             onClick={onClose}
-            className="text-slate-400 hover:text-white text-xs font-pixel px-1"
+            className="text-slate-400 hover:text-white text-xs font-pixel px-1 cursor-pointer uppercase"
           >
             X
           </button>

@@ -242,15 +242,18 @@ export interface TaskRunLog {
 
 // ─── Triggers ───────────────────────────────────────────────────
 
+export type TriggerMatchMode = "contains" | "starts-with" | "exact" | "regex";
+
 export interface Trigger {
   id: string;
   name: string;
   enabled: boolean;
   type: "message-pattern" | "skill-event" | "webhook" | "schedule";
   pattern?: string;
+  matchMode?: TriggerMatchMode;
   channelId?: string;
   senderAllowlist?: string[];
-  agentId: string;
+  agentId?: string | null;
   prompt: string;
   createdAt: number;
   lastTriggeredAt?: number;

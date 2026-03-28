@@ -262,7 +262,7 @@ class SchedulerRuntime extends BaseRuntime {
       if (task.type === "one-time") {
         updates.nextRunAt = new Date(schedule).getTime();
       } else if (task.type === "interval") {
-        updates.nextRunAt = Date.now() + parseInt(schedule, 10);
+        updates.nextRunAt = Date.now() + _parseIntervalMs(schedule);
       } else if (task.type === "cron") {
         updates.nextRunAt = _nextCronRun(schedule, Date.now());
       }
@@ -376,7 +376,7 @@ class SchedulerRuntime extends BaseRuntime {
         if (task.type === "one-time") {
           updates.enabled = false; // Disable after single execution
         } else if (task.type === "interval") {
-          updates.nextRunAt = now + parseInt(task.schedule, 10);
+          updates.nextRunAt = now + _parseIntervalMs(task.schedule);
         } else if (task.type === "cron") {
           updates.nextRunAt = _nextCronRun(task.schedule, now);
         }

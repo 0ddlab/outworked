@@ -263,7 +263,7 @@ export default function SkillsModal({
           <h2 className="text-xs font-pixel text-white">Manage Skills</h2>
           <button
             onClick={onClose}
-            className="text-slate-400 hover:text-white text-xs font-pixel px-1"
+            className="text-slate-400 hover:text-white text-xs font-pixel px-1 cursor-pointer uppercase"
           >
             X
           </button>

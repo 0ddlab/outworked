@@ -15,6 +15,7 @@ const triggerEngine = require("./trigger-engine");
 const verbose = process.env.VERBOSE_LOGGING === "true";
 
 const TRIGGER_PATH_RE = /^\/trigger\/([a-zA-Z0-9_-]+)$/;
+const MAX_BODY_BYTES = 10 * 1024 * 1024; // 10 MB
 
 class WebhookServer {
   /**
@@ -53,11 +54,21 @@ class WebhookServer {
 
       // Accumulate body chunks, then evaluate
       let body = "";
+      let overflow = false;
       req.on("data", (chunk) => {
         body += chunk;
+        if (Buffer.byteLength(body) > MAX_BODY_BYTES) {
+          overflow = true;
+          req.destroy();
+        }
       });
 
       req.on("end", () => {
+        if (overflow) {
+          res.writeHead(413, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Payload too large" }));
+          return;
+        }
         let parsed = {};
         try {
           parsed = JSON.parse(body);

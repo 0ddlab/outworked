@@ -264,13 +264,22 @@ function killAllShells() {
 
 // ─── Caffeinate: prevent sleep while tasks are in flight ──────────
 let caffeinateBlockerId = null;
+let caffeinateType = null; // "prevent-app-suspension" | "prevent-display-sleep"
 
-function caffeineStart() {
-  if (caffeinateBlockerId !== null) return; // already blocking
-  caffeinateBlockerId = powerSaveBlocker.start("prevent-app-suspension");
+function caffeineStart(type) {
+  if (caffeinateBlockerId !== null) {
+    // Already blocking — upgrade to stronger type if needed
+    if (type === "prevent-display-sleep" && caffeinateType !== "prevent-display-sleep") {
+      caffeineStop();
+    } else {
+      return;
+    }
+  }
+  caffeinateType = type;
+  caffeinateBlockerId = powerSaveBlocker.start(type);
   verbose &&
     console.log(
-      `[caffeinate] started power-save blocker id=${caffeinateBlockerId}`,
+      `[caffeinate] started power-save blocker id=${caffeinateBlockerId} type=${type}`,
     );
 }
 
@@ -284,13 +293,32 @@ function caffeineStop() {
       );
   }
   caffeinateBlockerId = null;
+  caffeinateType = null;
 }
 
 /** Call after adding/removing sessions to sync caffeinate state. */
 function syncCaffeinate() {
   const hasChannels = _hasConnectedChannels();
-  if (sdkBridge.hasActiveSessions() || hasChannels) caffeineStart();
-  else caffeineStop();
+  const hasSessions = sdkBridge.hasActiveSessions();
+  const hasScheduled = _hasEnabledScheduledTasks();
+  if (hasChannels) {
+    // Channels need the stronger blocker to prevent system sleep
+    caffeineStart("prevent-display-sleep");
+  } else if (hasSessions || hasScheduled) {
+    caffeineStart("prevent-app-suspension");
+  } else {
+    caffeineStop();
+  }
+}
+
+/** Check if any scheduled tasks are enabled and pending. */
+function _hasEnabledScheduledTasks() {
+  try {
+    const tasks = db.schedulerList();
+    return tasks.some((t) => t.enabled);
+  } catch {
+    return false;
+  }
 }
 
 /** Check if any registered channel is currently connected. */
@@ -2564,11 +2592,45 @@ app.whenReady().then(() => {
     triggerEngine.refreshPatterns();
     triggerEngine.setupTriggerIPC(ipcMain);
 
+    // Refresh trigger engine patterns after UI/tool mutations
+    ipcMain.handle("trigger:refreshPatterns", () => {
+      triggerEngine.refreshPatterns();
+      return { ok: true };
+    });
+
+    // Serve triggers.md documentation
+    ipcMain.handle("trigger:docs", () => {
+      const fs = require("fs");
+      const path = require("path");
+      try {
+        return fs.readFileSync(path.join(__dirname, "triggers", "triggers.md"), "utf-8");
+      } catch { return null; }
+    });
+
+    // Scheduled tasks for the triggers UI
+    ipcMain.handle("scheduler:list", () => {
+      try {
+        return db.schedulerList();
+      } catch { return []; }
+    });
+    ipcMain.handle("scheduler:delete", (_event, id) => {
+      try {
+        db.schedulerDelete(id);
+        syncCaffeinate();
+        return { ok: true };
+      } catch { return { ok: false }; }
+    });
+
     const webhookServer = new WebhookServer();
     webhookServer.start();
   } catch (err) {
     console.error("[triggers] Failed to initialize:", err.message);
   }
+
+  // Sync caffeinate for any pre-existing scheduled tasks, and re-sync
+  // periodically so one-time tasks that auto-disable release the blocker.
+  syncCaffeinate();
+  setInterval(syncCaffeinate, 30_000);
 
   // On startup, ensure the default workspace is accessible
   try {

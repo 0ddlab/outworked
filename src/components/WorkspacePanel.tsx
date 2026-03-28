@@ -281,13 +281,13 @@ export default function WorkspacePanel({ workspaceDir }: WorkspacePanelProps) {
       <div className="flex border-b border-slate-700 bg-slate-900">
         <button
           onClick={() => setMode("files")}
-          className={`flex-1 py-1.5 text-[11px] font-pixel transition-colors ${mode === "files" ? "text-green-400 border-b-2 border-green-500 bg-slate-800" : "text-slate-400 hover:text-slate-200"}`}
+          className={`flex-1 py-1.5 text-[11px] font-pixel cursor-pointer transition-colors ${mode === "files" ? "text-green-400 border-b-2 border-green-500 bg-slate-800" : "text-slate-400 hover:text-slate-200"}`}
         >
           📁 Files ({files.length})
         </button>
         <button
           onClick={() => setMode("changes")}
-          className={`flex-1 py-1.5 text-[11px] font-pixel transition-colors ${mode === "changes" ? "text-green-400 border-b-2 border-green-500 bg-slate-800" : "text-slate-400 hover:text-slate-200"}`}
+          className={`flex-1 py-1.5 text-[11px] font-pixel cursor-pointer transition-colors ${mode === "changes" ? "text-green-400 border-b-2 border-green-500 bg-slate-800" : "text-slate-400 hover:text-slate-200"}`}
         >
           {changedFiles.length > 0 ? (
             <span className="text-amber-400">
@@ -410,9 +410,9 @@ export default function WorkspacePanel({ workspaceDir }: WorkspacePanelProps) {
                     setSelectedDiffFile(null);
                     setDiffContent("");
                   }}
-                  className="text-[10px] text-slate-400 hover:text-white shrink-0 ml-2"
+                  className="text-[10px] text-slate-400 hover:text-white shrink-0 ml-2 cursor-pointer font-pixel uppercase"
                 >
-                  ✕
+                  X
                 </button>
               </div>
               <div className="flex-1 overflow-auto">

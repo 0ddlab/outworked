@@ -94,7 +94,7 @@ export default function MusicPlayer() {
       {/* Prev */}
       <button
         onClick={() => skip(-1)}
-        className="text-slate-300 hover:text-white transition-colors"
+        className="text-slate-300 hover:text-white transition-colors cursor-pointer"
         title="Previous track"
       >
         <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor">
@@ -106,7 +106,7 @@ export default function MusicPlayer() {
       {/* Play/Pause */}
       <button
         onClick={toggle}
-        className="text-indigo-400 hover:text-indigo-300 transition-colors"
+        className="text-indigo-400 hover:text-indigo-300 transition-colors cursor-pointer"
         title={playing ? "Pause" : "Play"}
       >
         {playing ? (
@@ -124,7 +124,7 @@ export default function MusicPlayer() {
       {/* Next */}
       <button
         onClick={() => skip(1)}
-        className="text-slate-300 hover:text-white transition-colors"
+        className="text-slate-300 hover:text-white transition-colors cursor-pointer"
         title="Next track"
       >
         <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor">
@@ -146,7 +146,7 @@ export default function MusicPlayer() {
       {/* Mute */}
       <button
         onClick={toggleMute}
-        className={`ml-auto transition-colors ${muted ? "text-red-400 hover:text-red-300" : "text-slate-300 hover:text-white"}`}
+        className={`ml-auto transition-colors cursor-pointer ${muted ? "text-red-400 hover:text-red-300" : "text-slate-300 hover:text-white"}`}
         title={muted ? "Unmute" : "Mute"}
       >
         {muted ? (

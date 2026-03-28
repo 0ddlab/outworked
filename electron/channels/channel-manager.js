@@ -3,6 +3,8 @@
 // messages, persists all traffic to SQLite, and bridges inbound events
 // to the renderer via IPC.
 
+const path = require("path");
+const fs = require("fs");
 const db = require("../db/database");
 const verbose = process.env.VERBOSE_LOGGING === "true";
 
@@ -34,6 +36,15 @@ const OUTBOUND_ECHO_WINDOW_MS = 30_000; // 30 seconds
  * @type {Map<string, { expiry: number, contents: string[] }>}
  */
 const _recentConversationSends = new Map();
+
+/**
+ * Dedup recently seen inbound messages to prevent double-processing from
+ * overlapping polls or re-delivered events.
+ * Key: "channelId:conversationId:timestamp:contentHash"
+ * @type {Set<string>}
+ */
+const _recentInboundKeys = new Set();
+const INBOUND_DEDUP_WINDOW_MS = 30_000;
 
 // ─── Registry management ──────────────────────────────────────
 
@@ -229,6 +240,17 @@ function setupChannelIPC(ipcMain, mainWindow) {
     return getAvailableTypes();
   });
 
+  // ── channel:docs ───────────────────────────────────────────────
+  // Return the setup documentation markdown for a channel type.
+  ipcMain.handle("channel:docs", (_event, type) => {
+    const mdPath = path.join(__dirname, `${type}-channel.md`);
+    try {
+      return fs.readFileSync(mdPath, "utf-8");
+    } catch {
+      return null;
+    }
+  });
+
   // ── channel:register ──────────────────────────────────────────
   // Create a channel instance from a ChannelConfig object and register it.
   ipcMain.handle("channel:register", (_event, config) => {
@@ -392,6 +414,19 @@ function _handleInbound(channelId, msg) {
     timestamp: msg.timestamp || Date.now(),
   };
 
+  // ── Inbound dedup: skip if we already processed this exact message ──
+  const dedupKey = `${channelId}:${full.conversationId}:${full.timestamp}:${(full.content || "").slice(0, 100)}`;
+  if (_recentInboundKeys.has(dedupKey)) {
+    verbose &&
+      console.log(`[ChannelManager] Skipping duplicate inbound: ${dedupKey}`);
+    return;
+  }
+  _recentInboundKeys.add(dedupKey);
+  setTimeout(
+    () => _recentInboundKeys.delete(dedupKey),
+    INBOUND_DEDUP_WINDOW_MS,
+  );
+
   // ── Echo detection: skip messages that match a recent outbound ──
   _pruneExpiredOutbound();
   const inboundNormalized = _normalizeForEcho(full.content);
@@ -531,7 +566,10 @@ function _handleInbound(channelId, msg) {
         `Channel: ${channelId}\n` +
         `Conversation: ${full.conversationId || "unknown"}\n\n` +
         `Message:\n${full.content}\n\n` +
-        `You MUST reply using the send_message tool with channelId="${channelId}" and conversationId="${full.conversationId || full.sender}".`;
+        `You MUST reply using the send_message tool with channelId="${channelId}" and conversationId="${full.conversationId || full.sender}".\n\n` +
+        `## Reply Protocol\n` +
+        `Send a SINGLE reply message with your response. Do NOT send multiple messages.\n` +
+        `Only send a preliminary confirmation (e.g. "On it, one moment.") followed by a second detailed reply if the task requires significant work like research, assignments, or multi-step processing. For simple questions, greetings, or short requests — reply once with the answer.`;
 
       _mainWindowContents.send("trigger:fire", {
         triggerId: "__default_channel_message",
