@@ -186,11 +186,13 @@ On first launch, the onboarding modal walks you through picking a workspace and 
 
 ### Build from Source
 
+This will start up a development instance of Outworked. To build a distributable, use `npm run electron:build` instead of `npm run electron:dev`
+
 ```bash
 git clone https://github.com/outworked/outworked.git
 cd outworked
 npm install
-npm run electron:build
+npm run electron:dev
 ```
 
 ---
