@@ -208,10 +208,13 @@ export default function ChatWindow({
   const agentsRef = useRef(agents);
   agentsRef.current = agents;
 
-  // Auto-send programmatically injected messages (e.g. from triggers).
-  // Uses a ref to pass the text directly to handleSend instead of relying
-  // on DOM button clicks which can silently fail.
+  // Auto-send programmatically injected messages (e.g. from triggers/scheduler).
+  // Uses a ref to call handleSend directly with the text, avoiding DOM click races.
+  // The retry loop handles the case where handleSendRef hasn't been set yet on
+  // first render (it's assigned later in the component body after handleSend is defined).
   const pendingAutoSendRef = useRef<string | null>(null);
+  const _noopSend = useRef<(text?: string) => void>(() => {}).current;
+  const handleSendRef = useRef<(text?: string) => void>(_noopSend);
 
   useEffect(() => {
     if (
@@ -223,22 +226,34 @@ export default function ChatWindow({
       (!isStreaming || (agent.isBoss && activeOrchestrationRef.current))
     ) {
       pendingNonceRef.current = pendingMessage.nonce;
-      pendingAutoSendRef.current = pendingMessage.text;
-      setInput(pendingMessage.text);
+      const text = pendingMessage.text;
+      pendingAutoSendRef.current = text;
+      setInput(text);
       onPendingMessageConsumed?.();
-      // Defer to next tick so input state is set before handleSend reads it
-      setTimeout(() => {
-        const sendBtn = document.getElementById("chat-send-btn");
-        if (sendBtn) {
-          sendBtn.click();
+
+      // Retry until handleSendRef is the real handleSend (set later in the
+      // component body). Gives up after 2s to avoid infinite loops.
+      let attempts = 0;
+      const maxAttempts = 40; // 40 × 50ms = 2s
+      const tryAutoSend = () => {
+        attempts++;
+        if (handleSendRef.current !== _noopSend) {
+          try {
+            handleSendRef.current(text);
+          } catch (err) {
+            console.error("[ChatWindow] Auto-send failed:", err);
+          }
+          pendingAutoSendRef.current = null;
+        } else if (attempts < maxAttempts) {
+          setTimeout(tryAutoSend, 50);
         } else {
-          // Fallback: reset agent status if we can't send
-          console.warn("[ChatWindow] Could not find send button for auto-send");
+          console.warn("[ChatWindow] Auto-send gave up after 2s — handleSend never became available");
           pendingAutoSendRef.current = null;
         }
-      }, 100);
+      };
+      setTimeout(tryAutoSend, 50);
     }
-  }, [pendingMessage, agent, isStreaming]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [pendingMessage, agent, isStreaming, _noopSend]); // eslint-disable-line react-hooks/exhaustive-deps
 
   function addDebug(line: string) {
     const ts = new Date().toISOString().slice(11, 23);
@@ -271,6 +286,12 @@ export default function ChatWindow({
     }, 1000);
     return () => clearInterval(interval);
   }, [workStartedAt, hasRunningBgTask]);
+
+  // Clear inline permission badges when switching agents
+  useEffect(() => {
+    setPendingPermission(null);
+    setPermissionLog([]);
+  }, [agent?.id]);
 
   // Load session list when history panel opens or agent changes
   const refreshSessionList = useCallback(async () => {
@@ -386,12 +407,13 @@ export default function ChatWindow({
     );
   }
 
-  async function handleSend() {
-    if (!input.trim() || !agent) return;
+  async function handleSend(overrideText?: string) {
+    const text = overrideText || input.trim();
+    if (!text || !agent) return;
     // Allow sending when boss has active orchestration (employees working, boss is free)
     if (isStreaming && !(agent.isBoss && activeOrchestrationRef.current))
       return;
-    const userText = input.trim();
+    const userText = text;
     setInput("");
     setWorkStartedAt(Date.now());
     setIsStreaming(true);
@@ -2031,6 +2053,9 @@ export default function ChatWindow({
     }
   }
 
+  // Keep ref in sync so the auto-send useEffect can call handleSend directly
+  handleSendRef.current = handleSend;
+
   function handleSendBackground() {
     if (!input.trim() || isStreaming || !agent || agent.isBoss) return;
     const userText = input.trim();
@@ -2883,7 +2908,7 @@ export default function ChatWindow({
             <div className="flex flex-col gap-1">
               <button
                 id="chat-send-btn"
-                onClick={handleSend}
+                onClick={() => handleSend()}
                 disabled={!input.trim()}
                 className="px-2 py-1 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-white text-[11px] font-pixel rounded transition-colors cursor-pointer"
               >

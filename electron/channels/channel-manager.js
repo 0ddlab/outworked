@@ -37,6 +37,15 @@ const OUTBOUND_ECHO_WINDOW_MS = 30_000; // 30 seconds
  */
 const _recentConversationSends = new Map();
 
+/**
+ * Dedup recently seen inbound messages to prevent double-processing from
+ * overlapping polls or re-delivered events.
+ * Key: "channelId:conversationId:timestamp:contentHash"
+ * @type {Set<string>}
+ */
+const _recentInboundKeys = new Set();
+const INBOUND_DEDUP_WINDOW_MS = 30_000;
+
 // ─── Registry management ──────────────────────────────────────
 
 /**
@@ -405,6 +414,19 @@ function _handleInbound(channelId, msg) {
     timestamp: msg.timestamp || Date.now(),
   };
 
+  // ── Inbound dedup: skip if we already processed this exact message ──
+  const dedupKey = `${channelId}:${full.conversationId}:${full.timestamp}:${(full.content || "").slice(0, 100)}`;
+  if (_recentInboundKeys.has(dedupKey)) {
+    verbose &&
+      console.log(`[ChannelManager] Skipping duplicate inbound: ${dedupKey}`);
+    return;
+  }
+  _recentInboundKeys.add(dedupKey);
+  setTimeout(
+    () => _recentInboundKeys.delete(dedupKey),
+    INBOUND_DEDUP_WINDOW_MS,
+  );
+
   // ── Echo detection: skip messages that match a recent outbound ──
   _pruneExpiredOutbound();
   const inboundNormalized = _normalizeForEcho(full.content);
@@ -546,9 +568,8 @@ function _handleInbound(channelId, msg) {
         `Message:\n${full.content}\n\n` +
         `You MUST reply using the send_message tool with channelId="${channelId}" and conversationId="${full.conversationId || full.sender}".\n\n` +
         `## Reply Protocol\n` +
-        `1. FIRST, send a brief confirmation message acknowledging you received the message (e.g. "Got it, looking into this now." or "On it, one moment."). This lets the sender know their message was received.\n` +
-        `2. THEN, process the request and send your full reply with the actual response.\n` +
-        `Keep the confirmation short and natural — do not repeat the sender's message back to them.`;
+        `Send a SINGLE reply message with your response. Do NOT send multiple messages.\n` +
+        `Only send a preliminary confirmation (e.g. "On it, one moment.") followed by a second detailed reply if the task requires significant work like research, assignments, or multi-step processing. For simple questions, greetings, or short requests — reply once with the answer.`;
 
       _mainWindowContents.send("trigger:fire", {
         triggerId: "__default_channel_message",

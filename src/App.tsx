@@ -54,6 +54,7 @@ import WorkspacePanel from "./components/WorkspacePanel";
 import GitPanel from "./components/GitPanel";
 import CostDashboard from "./components/CostDashboard";
 import ChannelsPanel from "./components/ChannelsPanel";
+import TriggersPanel from "./components/TriggersPanel";
 import NotificationCenter, {
   NotificationToast,
 } from "./components/NotificationCenter";
@@ -157,6 +158,7 @@ export default function App() {
   const [showPermsModal, setShowPermsModal] = useState(false);
   const [showCostsModal, setShowCostsModal] = useState(false);
   const [showChannelsModal, setShowChannelsModal] = useState(false);
+  const [showTriggersModal, setShowTriggersModal] = useState(false);
   const [permsEmpty, setPermsEmpty] = useState(false);
   const [permsDismissed, setPermsDismissed] = useState(false);
   const [debugMode, setDebugMode] = useState(false);
@@ -803,6 +805,8 @@ export default function App() {
     // Reload from disk to pick up project-level agents for the new workspace
     const fresh = await loadAgentsFromDisk(dir);
     setAgents(fresh);
+    // Clear stale permission/notification badges from the previous workspace
+    setNotifications([]);
     // Re-check permissions for the new workspace
     setPermsDismissed(false);
     try {
@@ -860,7 +864,7 @@ export default function App() {
         <div className="px-2 py-1.5 border-t border-gray-800">
           <MusicPlayer />
         </div>
-        <div className="px-3 py-2 border-t border-gray-800 flex flex-col gap-1.5">
+        <div className="px-3 py-2 border-t border-gray-800 flex flex-col gap-1.5 overflow-hidden">
           {/* <button
             onClick={() => {
               const next = !agentTeamsEnabled;
@@ -916,13 +920,13 @@ export default function App() {
           <div className="flex gap-1.5">
             <button
               onClick={() => setShowPermsModal(true)}
-              className={`flex-1 btn-pixel text-[10px] ${permsEmpty && !permsDismissed ? "bg-amber-700 hover:bg-amber-600 text-amber-50 animate-pulse" : "bg-slate-700 hover:bg-slate-600 text-slate-200"}`}
+              className={`flex-1 min-w-0 btn-pixel text-[10px] ${permsEmpty && !permsDismissed ? "bg-amber-700 hover:bg-amber-600 text-amber-50 animate-pulse" : "bg-slate-700 hover:bg-slate-600 text-slate-200"}`}
             >
               🔒 Perms
             </button>
             <button
               onClick={() => setShowCostsModal(true)}
-              className="flex-1 btn-pixel text-[10px] bg-slate-700 hover:bg-slate-600 text-slate-200"
+              className="flex-1 min-w-0 btn-pixel text-[10px] bg-slate-700 hover:bg-slate-600 text-slate-200"
             >
               💰 Costs
             </button>
@@ -930,9 +934,15 @@ export default function App() {
           <div className="flex gap-1.5">
             <button
               onClick={() => setShowChannelsModal(true)}
-              className="flex-1 btn-pixel text-[10px] bg-slate-700 hover:bg-slate-600 text-slate-200"
+              className="flex-1 min-w-0 btn-pixel text-[10px] bg-slate-700 hover:bg-slate-600 text-slate-200"
             >
               💬 Channels
+            </button>
+            <button
+              onClick={() => setShowTriggersModal(true)}
+              className="flex-1 min-w-0 btn-pixel text-[10px] bg-slate-700 hover:bg-slate-600 text-slate-200"
+            >
+              ⚡ Triggers
             </button>
           </div>
           <div className="flex gap-1.5">
@@ -1344,6 +1354,34 @@ export default function App() {
               style={{ minHeight: "400px" }}
             >
               <ChannelsPanel />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showTriggersModal && (
+        <div
+          className="fixed inset-0 bg-black/60 flex items-center justify-center z-50"
+          onClick={() => setShowTriggersModal(false)}
+        >
+          <div
+            className="bg-slate-800 border border-slate-600 rounded-lg w-[480px] max-h-[80vh] shadow-xl flex flex-col"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between px-4 py-3 border-b border-slate-700">
+              <h3 className="text-sm font-pixel text-white">⚡ Triggers</h3>
+              <button
+                onClick={() => setShowTriggersModal(false)}
+                className="text-slate-400 hover:text-white text-sm cursor-pointer font-pixel uppercase"
+              >
+                X
+              </button>
+            </div>
+            <div
+              className="flex-1 overflow-y-auto"
+              style={{ minHeight: "400px" }}
+            >
+              <TriggersPanel agents={agents} />
             </div>
           </div>
         </div>

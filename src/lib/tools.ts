@@ -29,6 +29,11 @@ function getDbAPI(): {
     channelId: string,
     limit: number,
   ) => Promise<{ direction: string; sender?: string; content: string; timestamp: number }[]>;
+  triggerCreate: (trigger: Record<string, unknown>) => Promise<unknown>;
+  triggerList: () => Promise<Record<string, unknown>[]>;
+  triggerUpdate: (id: string, updates: Record<string, unknown>) => Promise<unknown>;
+  triggerDelete: (id: string) => Promise<unknown>;
+  triggerRefreshPatterns: () => Promise<unknown>;
 } | null {
   const w = window as unknown as { electronAPI?: { db?: unknown } };
   return (w.electronAPI?.db as ReturnType<typeof getDbAPI>) ?? null;
@@ -369,6 +374,88 @@ export const AGENT_TOOLS: ToolDefinition[] = [
       required: ["channelId"],
     },
   },
+  {
+    name: "create_trigger",
+    description:
+      'Create an event trigger that fires a prompt to an agent. Types: "message-pattern" (regex on channel messages), "skill-event" (listen for skill events), "webhook" (HTTP POST to localhost:7891/trigger/<id>). Use $1/$2 for regex captures or {{key}} for webhook/event placeholders in the prompt.',
+    parameters: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "Human-readable trigger name" },
+        type: {
+          type: "string",
+          enum: ["message-pattern", "skill-event", "webhook", "schedule"],
+          description: "Trigger type",
+        },
+        pattern: {
+          type: "string",
+          description:
+            "Regex pattern (for message-pattern) or event type name (for skill-event). Not needed for webhook.",
+        },
+        channelId: {
+          type: "string",
+          description: "Scope to a specific channel ID (message-pattern only, omit for all channels)",
+        },
+        senderAllowlist: {
+          type: "string",
+          description:
+            'Comma-separated sender names, or "*" for any sender (message-pattern only, default: "*")',
+        },
+        agentId: {
+          type: "string",
+          description: "ID of the target agent. Omit to route to the boss agent.",
+        },
+        prompt: {
+          type: "string",
+          description:
+            "Prompt template. Use $1, $2 for regex captures. Use {{key}} for webhook JSON body or event data placeholders.",
+        },
+        enabled: {
+          type: "boolean",
+          description: "Whether the trigger is active (default: true)",
+        },
+      },
+      required: ["name", "type", "prompt"],
+    },
+  },
+  {
+    name: "list_triggers",
+    description:
+      "List all configured triggers with their type, pattern, target agent, enabled status, and fire count.",
+    parameters: {
+      type: "object",
+      properties: {},
+    },
+  },
+  {
+    name: "update_trigger",
+    description:
+      "Update an existing trigger's properties (name, pattern, prompt, enabled, agentId, etc).",
+    parameters: {
+      type: "object",
+      properties: {
+        triggerId: { type: "string", description: "ID of the trigger to update" },
+        name: { type: "string", description: "New name" },
+        enabled: { type: "boolean", description: "Enable or disable" },
+        pattern: { type: "string", description: "New pattern" },
+        prompt: { type: "string", description: "New prompt template" },
+        agentId: { type: "string", description: "New target agent ID" },
+        channelId: { type: "string", description: "New channel scope" },
+      },
+      required: ["triggerId"],
+    },
+  },
+  {
+    name: "delete_trigger",
+    description: "Delete a trigger by ID.",
+    parameters: {
+      type: "object",
+      properties: {
+        triggerId: { type: "string", description: "ID of the trigger to delete" },
+      },
+      required: ["triggerId"],
+    },
+  },
 ];
 
 export const BOSS_ASSIGN_TOOL: ToolDefinition = AGENT_TOOLS.find(
@@ -540,6 +627,65 @@ export async function executeTool(
             `[${m.direction}] ${m.sender ? m.sender + ": " : ""}${m.content.slice(0, 300)}${m.content.length > 300 ? "…" : ""} (${new Date(m.timestamp).toLocaleString()})`,
         )
         .join("\n");
+    }
+    case "create_trigger": {
+      const db = getDbAPI();
+      if (!db) return "Error: database not available (not running in Electron)";
+      const id = `trigger-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+      const allowlist = args.senderAllowlist
+        ? args.senderAllowlist.split(",").map((s: string) => s.trim()).filter(Boolean)
+        : ["*"];
+      await db.triggerCreate({
+        id,
+        name: args.name,
+        enabled: args.enabled !== "false",
+        type: args.type,
+        pattern: args.pattern || null,
+        channelId: args.channelId || null,
+        senderAllowlist: allowlist,
+        agentId: args.agentId || null,
+        prompt: args.prompt,
+        createdAt: Date.now(),
+      });
+      await db.triggerRefreshPatterns().catch(() => {});
+      const webhookHint = args.type === "webhook"
+        ? `\nWebhook URL: POST http://127.0.0.1:7891/trigger/${id}`
+        : "";
+      return `Trigger created: [${id}] "${args.name}" (${args.type})${webhookHint}`;
+    }
+    case "list_triggers": {
+      const db = getDbAPI();
+      if (!db) return "Error: database not available (not running in Electron)";
+      const triggers = await db.triggerList();
+      if (!triggers || triggers.length === 0) return "No triggers configured.";
+      return (triggers as Record<string, unknown>[])
+        .map(
+          (t) =>
+            `[${t.id}] "${t.name}" (${t.type}) — ${t.enabled ? "enabled" : "disabled"} — ${t.triggerCount || 0}x fired${t.pattern ? ` — pattern: ${t.pattern}` : ""}${t.agentId ? ` — agent: ${t.agentId}` : " — agent: boss"}`,
+        )
+        .join("\n");
+    }
+    case "update_trigger": {
+      const db = getDbAPI();
+      if (!db) return "Error: database not available (not running in Electron)";
+      const { triggerId, ...updates } = args as Record<string, string>;
+      if (!triggerId) return "Error: triggerId is required";
+      const parsed: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(updates)) {
+        if (k === "enabled") parsed[k] = v === "true";
+        else if (v !== undefined && v !== "") parsed[k] = v;
+      }
+      await db.triggerUpdate(triggerId, parsed);
+      await db.triggerRefreshPatterns().catch(() => {});
+      return `Trigger ${triggerId} updated.`;
+    }
+    case "delete_trigger": {
+      const db = getDbAPI();
+      if (!db) return "Error: database not available (not running in Electron)";
+      if (!args.triggerId) return "Error: triggerId is required";
+      await db.triggerDelete(args.triggerId);
+      await db.triggerRefreshPatterns().catch(() => {});
+      return `Trigger ${args.triggerId} deleted.`;
     }
     default:
       return `Unknown tool: ${name}`;

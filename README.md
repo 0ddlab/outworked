@@ -41,7 +41,7 @@
   <a href="#features"><strong>Features</strong></a> ·
   <a href="#skills"><strong>Skills</strong></a> ·
   <a href="#mcp-servers"><strong>MCP Servers</strong></a> ·
-  <a href="#channels--scheduling"><strong>Channels</strong></a>
+  <a href="#channels--triggers"><strong>Channels & Triggers</strong></a>
 </p>
 
 ---
@@ -295,22 +295,70 @@ You can also add **custom MCP servers** (stdio or HTTP) and configure environmen
 
 ---
 
-## Channels & Scheduling
+## Channels & Triggers
 
 ### Channels
 
 Channels connect agents to messaging platforms. Supported channel types:
 
 - **iMessage** — Send and receive messages via phone number or email
-- **Slack** — Send and receive messages in Slack channels and threads - next release though
+- **Slack** — Send and receive messages in Slack channels and threads
 
 Agents interact with channels through built-in tools: `send_message`, `list_channels`, and `read_channel_messages`. Configure allowed senders to control who can reach your agents.
 
 You can also inject special system prompts for each channel, so that certain inbound messages get a different response than others.
 
+### Triggers
+
+Triggers wire up events to agents — when something happens, a prompt is automatically sent to an agent. Think of them as "if this, then prompt that."
+
+**Trigger types:**
+
+| Type                | Fires when…                                                         |
+| ------------------- | ------------------------------------------------------------------- |
+| **Message Pattern** | An inbound channel message (Slack, iMessage) matches a pattern      |
+| **Webhook**         | An external system sends an HTTP POST to a trigger URL              |
+| **Skill Event**     | An internal skill emits a named event (e.g. `scheduler:task_fired`) |
+
+**Message pattern matching** supports four modes:
+
+- `contains` — fires if the message contains the text anywhere (default)
+- `starts-with` — fires if the message starts with the text
+- `exact` — fires only on an exact match
+- `regex` — full regex with capture groups (`$1`, `$2`, …) substituted into the prompt
+
+For non-regex modes, the original message is automatically appended to the prompt so the agent has full context.
+
+**Setting up a trigger:**
+
+1. Click **Triggers** in the left sidebar
+2. Click **+ New Trigger** and pick a type
+3. Choose a match mode and fill in the pattern
+4. Optionally scope to a specific channel or restrict senders
+5. Pick which agent receives the prompt (defaults to the boss agent)
+6. Write the prompt template — use `$1`, `$2` for regex captures or `{{key}}` for webhook/event data
+
+Agents can also create and manage triggers programmatically using the `create_trigger`, `list_triggers`, `update_trigger`, and `delete_trigger` tools.
+
+**Example — Slack deploy command:**
+
+> Pattern: `deploy` (contains mode)
+> Prompt: `Handle this deploy request.`
+>
+> When someone types "please deploy the api" in Slack, the agent receives the prompt with the original message appended and reply instructions so it knows where to respond.
+
+**Example — regex with capture groups:**
+
+> Pattern: `deploy (.+) to (staging|prod)`
+> Prompt: `Deploy the $1 service to $2. Run the deploy script and report back.`
+>
+> "deploy api to staging" → agent receives: _"Deploy the api service to staging. Run the deploy script and report back."_
+
+**Channel reply instructions** are automatically prepended when a trigger fires from a channel message, including sender name, channel ID, and conversation ID so the agent knows exactly where to reply.
+
 ### Scheduling
 
-Ask an agent to schedule a task or run a task on a schedule.
+The **Scheduler skill** handles time-based automation — cron expressions, intervals, and one-time tasks. Ask an agent to schedule a task. Under the hood, scheduled tasks fire as skill events that the trigger engine picks up and routes to agents.
 
 ---
 

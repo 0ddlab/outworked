@@ -19,7 +19,7 @@ interface ChannelLiveStatus {
 interface ChannelFieldMeta {
   key: string;
   label: string;
-  type: string; // "text" | "password"
+  type: string; // "text" | "password" | "boolean"
   placeholder?: string;
   hint?: string;
   required?: boolean;
@@ -579,6 +579,10 @@ function AddChannelForm({
       const config: Record<string, unknown> = {};
 
       for (const field of typeMeta.fields) {
+        if (field.type === "boolean") {
+          config[field.key] = fieldValues[field.key] === "true";
+          continue;
+        }
         const raw = fieldValues[field.key]?.trim();
         if (!raw) continue;
 
@@ -635,27 +639,47 @@ function AddChannelForm({
         />
       </label>
 
-      {typeMeta.fields.map((field) => (
-        <label
-          key={field.key}
-          className="text-[10px] text-slate-400 font-pixel"
-        >
-          {field.label}
-          {field.required && <span className="text-red-400 ml-0.5">*</span>}
-          <input
-            className="input-mono w-full mt-1"
-            type={field.type === "password" ? "password" : "text"}
-            value={fieldValues[field.key] || ""}
-            onChange={(e) => setField(field.key, e.target.value)}
-            placeholder={field.placeholder}
-          />
-          {field.hint && (
-            <span className="text-[9px] text-slate-500 mt-0.5 block">
-              {field.hint}
-            </span>
-          )}
-        </label>
-      ))}
+      {typeMeta.fields.map((field) =>
+        field.type === "boolean" ? (
+          <label
+            key={field.key}
+            className="text-[10px] text-slate-400 font-pixel flex items-center gap-2 cursor-pointer"
+          >
+            <input
+              type="checkbox"
+              checked={fieldValues[field.key] === "true"}
+              onChange={(e) =>
+                setField(field.key, e.target.checked ? "true" : "false")
+              }
+              className="accent-slate-400"
+            />
+            {field.label}
+            {field.hint && (
+              <span className="text-[9px] text-slate-500">{field.hint}</span>
+            )}
+          </label>
+        ) : (
+          <label
+            key={field.key}
+            className="text-[10px] text-slate-400 font-pixel"
+          >
+            {field.label}
+            {field.required && <span className="text-red-400 ml-0.5">*</span>}
+            <input
+              className="input-mono w-full mt-1"
+              type={field.type === "password" ? "password" : "text"}
+              value={fieldValues[field.key] || ""}
+              onChange={(e) => setField(field.key, e.target.value)}
+              placeholder={field.placeholder}
+            />
+            {field.hint && (
+              <span className="text-[9px] text-slate-500 mt-0.5 block">
+                {field.hint}
+              </span>
+            )}
+          </label>
+        )
+      )}
 
       <label className="text-[10px] text-slate-400 font-pixel">
         System Instructions
@@ -705,7 +729,7 @@ function EditChannelForm({
     const init: Record<string, string> = {};
     for (const f of typeMeta.fields) {
       const val = cfg[f.key];
-      init[f.key] = Array.isArray(val) ? val.join(", ") : ((val as string) || "");
+      init[f.key] = f.type === "boolean" ? (val ? "true" : "false") : Array.isArray(val) ? val.join(", ") : ((val as string) || "");
     }
     return init;
   });
@@ -730,6 +754,10 @@ function EditChannelForm({
       const config: Record<string, unknown> = {};
 
       for (const field of typeMeta.fields) {
+        if (field.type === "boolean") {
+          config[field.key] = fieldValues[field.key] === "true";
+          continue;
+        }
         const raw = fieldValues[field.key]?.trim();
         if (!raw) continue;
 
@@ -775,27 +803,47 @@ function EditChannelForm({
         />
       </label>
 
-      {typeMeta.fields.map((field) => (
-        <label
-          key={field.key}
-          className="text-[10px] text-slate-400 font-pixel"
-        >
-          {field.label}
-          {field.required && <span className="text-red-400 ml-0.5">*</span>}
-          <input
-            className="input-mono w-full mt-1"
-            type={field.type === "password" ? "password" : "text"}
-            value={fieldValues[field.key] || ""}
-            onChange={(e) => setField(field.key, e.target.value)}
-            placeholder={field.placeholder}
-          />
-          {field.hint && (
-            <span className="text-[9px] text-slate-500 mt-0.5 block">
-              {field.hint}
-            </span>
-          )}
-        </label>
-      ))}
+      {typeMeta.fields.map((field) =>
+        field.type === "boolean" ? (
+          <label
+            key={field.key}
+            className="text-[10px] text-slate-400 font-pixel flex items-center gap-2 cursor-pointer"
+          >
+            <input
+              type="checkbox"
+              checked={fieldValues[field.key] === "true"}
+              onChange={(e) =>
+                setField(field.key, e.target.checked ? "true" : "false")
+              }
+              className="accent-slate-400"
+            />
+            {field.label}
+            {field.hint && (
+              <span className="text-[9px] text-slate-500">{field.hint}</span>
+            )}
+          </label>
+        ) : (
+          <label
+            key={field.key}
+            className="text-[10px] text-slate-400 font-pixel"
+          >
+            {field.label}
+            {field.required && <span className="text-red-400 ml-0.5">*</span>}
+            <input
+              className="input-mono w-full mt-1"
+              type={field.type === "password" ? "password" : "text"}
+              value={fieldValues[field.key] || ""}
+              onChange={(e) => setField(field.key, e.target.value)}
+              placeholder={field.placeholder}
+            />
+            {field.hint && (
+              <span className="text-[9px] text-slate-500 mt-0.5 block">
+                {field.hint}
+              </span>
+            )}
+          </label>
+        )
+      )}
 
       <label className="text-[10px] text-slate-400 font-pixel">
         System Instructions

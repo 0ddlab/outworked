@@ -202,6 +202,11 @@ contextBridge.exposeInMainWorld("electronAPI", {
     triggerUpdate: (id, updates) =>
       ipcRenderer.invoke("db:trigger:update", id, updates),
     triggerDelete: (id) => ipcRenderer.invoke("db:trigger:delete", id),
+    triggerDocs: () => ipcRenderer.invoke("trigger:docs"),
+    triggerTest: (id) => ipcRenderer.invoke("trigger:test", id),
+    triggerRefreshPatterns: () => ipcRenderer.invoke("trigger:refreshPatterns"),
+    schedulerList: () => ipcRenderer.invoke("scheduler:list"),
+    schedulerDelete: (id) => ipcRenderer.invoke("scheduler:delete", id),
 
     // Channel configs
     channelConfigSave: (config) =>
@@ -274,9 +279,6 @@ contextBridge.exposeInMainWorld("electronAPI", {
       ipcRenderer.on("trigger:fire", listener);
       return () => ipcRenderer.removeListener("trigger:fire", listener);
     },
-
-    // Trigger test
-    triggerTest: (triggerId) => ipcRenderer.invoke("trigger:test", triggerId),
   },
 
   // Session persistence

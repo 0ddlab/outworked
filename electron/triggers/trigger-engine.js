@@ -21,6 +21,23 @@ class TriggerEngine {
   }
 
   /**
+   * Convert a user-friendly pattern + match mode into a regex string.
+   * @param {string} pattern - The user's input (keyword, phrase, or raw regex)
+   * @param {string} matchMode - 'contains' | 'starts-with' | 'exact' | 'regex'
+   * @returns {string} A regex pattern string
+   */
+  _buildRegex(pattern, matchMode) {
+    if (matchMode === 'regex') return pattern;
+    const escaped = pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    switch (matchMode) {
+      case 'starts-with': return `^${escaped}`;
+      case 'exact': return `^${escaped}$`;
+      case 'contains':
+      default: return escaped;
+    }
+  }
+
+  /**
    * (Re-)compile regex patterns for all enabled message-pattern triggers.
    * Call this after triggers are created, updated, or deleted.
    */
@@ -30,10 +47,11 @@ class TriggerEngine {
     for (const t of triggers) {
       if (t.pattern && t.enabled) {
         try {
-          this._compiledPatterns.set(t.id, new RegExp(t.pattern, 'i'));
+          const regexStr = this._buildRegex(t.pattern, t.matchMode || 'contains');
+          this._compiledPatterns.set(t.id, new RegExp(regexStr, 'i'));
         } catch (err) {
           console.warn(
-            `[TriggerEngine] Skipping trigger "${t.name}" (${t.id}): invalid regex pattern "${t.pattern}" — ${err.message}`,
+            `[TriggerEngine] Skipping trigger "${t.name}" (${t.id}): invalid pattern "${t.pattern}" — ${err.message}`,
           );
         }
       }
@@ -132,6 +150,21 @@ class TriggerEngine {
           regexMatch[i] ?? '',
         );
       }
+    } else if (trigger.type === 'message-pattern' && trigger.pattern) {
+      // No regex match provided (e.g. test fire) — run the pattern against
+      // context.content so $1/$2 placeholders still get substituted.
+      try {
+        const re = new RegExp(trigger.pattern, 'i');
+        const fallback = context?.content ? String(context.content).match(re) : null;
+        if (fallback) {
+          for (let i = 1; i < fallback.length; i++) {
+            prompt = prompt.replace(
+              new RegExp(`\\$${i}`, 'g'),
+              fallback[i] ?? '',
+            );
+          }
+        }
+      } catch { /* invalid pattern — leave placeholders as-is */ }
     }
 
     // Substitute named placeholders ({{key}})
@@ -142,6 +175,32 @@ class TriggerEngine {
           String(val),
         );
       }
+    }
+
+    // For non-regex message-pattern triggers, append the original message
+    // so the agent has the full context without needing capture groups.
+    if (
+      trigger.type === 'message-pattern' &&
+      trigger.matchMode !== 'regex' &&
+      context?.content
+    ) {
+      prompt +=
+        `\n\nOriginal message from ${context.sender || 'unknown'}:\n` +
+        String(context.content);
+    }
+
+    // If this trigger fired from a channel message, prepend reply instructions
+    // so the agent knows which channel/conversation to reply to.
+    if (context && context.channelId) {
+      const replyInstructions =
+        `## Channel Reply Instructions\n` +
+        `This trigger fired from a channel message.\n` +
+        `From: ${context.sender || 'unknown'}\n` +
+        `Channel: ${context.channelId}\n` +
+        `Conversation: ${context.conversationId || context.sender || 'unknown'}\n\n` +
+        `You MUST reply using the send_message tool with channelId="${context.channelId}" and conversationId="${context.conversationId || context.sender}".\n` +
+        `Send a SINGLE reply message. Only send a preliminary confirmation followed by a detailed reply if the task requires significant work.\n\n`;
+      prompt = replyInstructions + prompt;
     }
 
     // Persist the fire event in the DB counter

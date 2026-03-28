@@ -300,13 +300,24 @@ function caffeineStop() {
 function syncCaffeinate() {
   const hasChannels = _hasConnectedChannels();
   const hasSessions = sdkBridge.hasActiveSessions();
+  const hasScheduled = _hasEnabledScheduledTasks();
   if (hasChannels) {
     // Channels need the stronger blocker to prevent system sleep
     caffeineStart("prevent-display-sleep");
-  } else if (hasSessions) {
+  } else if (hasSessions || hasScheduled) {
     caffeineStart("prevent-app-suspension");
   } else {
     caffeineStop();
+  }
+}
+
+/** Check if any scheduled tasks are enabled and pending. */
+function _hasEnabledScheduledTasks() {
+  try {
+    const tasks = db.schedulerList();
+    return tasks.some((t) => t.enabled);
+  } catch {
+    return false;
   }
 }
 
@@ -2581,11 +2592,45 @@ app.whenReady().then(() => {
     triggerEngine.refreshPatterns();
     triggerEngine.setupTriggerIPC(ipcMain);
 
+    // Refresh trigger engine patterns after UI/tool mutations
+    ipcMain.handle("trigger:refreshPatterns", () => {
+      triggerEngine.refreshPatterns();
+      return { ok: true };
+    });
+
+    // Serve triggers.md documentation
+    ipcMain.handle("trigger:docs", () => {
+      const fs = require("fs");
+      const path = require("path");
+      try {
+        return fs.readFileSync(path.join(__dirname, "triggers", "triggers.md"), "utf-8");
+      } catch { return null; }
+    });
+
+    // Scheduled tasks for the triggers UI
+    ipcMain.handle("scheduler:list", () => {
+      try {
+        return db.schedulerList();
+      } catch { return []; }
+    });
+    ipcMain.handle("scheduler:delete", (_event, id) => {
+      try {
+        db.schedulerDelete(id);
+        syncCaffeinate();
+        return { ok: true };
+      } catch { return { ok: false }; }
+    });
+
     const webhookServer = new WebhookServer();
     webhookServer.start();
   } catch (err) {
     console.error("[triggers] Failed to initialize:", err.message);
   }
+
+  // Sync caffeinate for any pre-existing scheduled tasks, and re-sync
+  // periodically so one-time tasks that auto-disable release the blocker.
+  syncCaffeinate();
+  setInterval(syncCaffeinate, 30_000);
 
   // On startup, ensure the default workspace is accessible
   try {
