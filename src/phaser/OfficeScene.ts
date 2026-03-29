@@ -3,73 +3,21 @@ import { Agent, AGENT_COLORS } from "../lib/types";
 import {
   buildPalette,
   registerAgentTextures,
+  registerAgentFromSheet,
+  loadSpriteSheetImage,
   FRAME_PX,
   AnimState,
 } from "./SpriteGen";
-
-const TILE = 48;
-
-// Rich color palette
-const P = {
-  // Floor — warm wood planks
-  plank1: 0x7a5c3e,
-  plank2: 0x6d5236,
-  plank3: 0x8a6a48,
-  plankLine: 0x5a422e,
-  // Walls
-  wall: 0x2a2a40,
-  wallDark: 0x1e1e32,
-  wallAccent: 0x343450,
-  baseboard: 0x4a3a2a,
-  // Furniture - desks
-  desk: 0x5c4535,
-  deskTop: 0x6d553f,
-  deskHighlight: 0x7d6549,
-  deskLeg: 0x4a3728,
-  // Monitor
-  monitor: 0x1a1a2e,
-  monitorBezel: 0x333344,
-  monitorScreen: 0x00d4ff,
-  monitorScreenAlt: 0x00ff88,
-  // Chair
-  chair: 0x2c3e50,
-  chairSeat: 0x3a5068,
-  chairHighlight: 0x4a6078,
-  // Plants
-  plant: 0x2d6a4f,
-  plantLight: 0x3d8a6f,
-  plantDark: 0x1d5a3f,
-  plantPot: 0x8b5e3c,
-  plantPotHighlight: 0xa67048,
-  // Window
-  window: 0x87ceeb,
-  windowLight: 0xb0e0f0,
-  windowFrame: 0x5a5a7a,
-  // Rug
-  rug: 0x6b2737,
-  rugLight: 0x7b3747,
-  rugBorder: 0x8b4757,
-  rugPattern: 0x5b1727,
-  // Bookshelf
-  bookshelf: 0x6b4c2a,
-  bookshelfDark: 0x5b3c1a,
-  book1: 0xe74c3c,
-  book2: 0x3498db,
-  book3: 0x2ecc71,
-  book4: 0xf1c40f,
-  book5: 0x9b59b6,
-  book6: 0xe67e22,
-  // Coffee machine
-  coffee: 0x5d4037,
-  coffeeHighlight: 0x7d6057,
-  coffeeMetal: 0x9e9e9e,
-  // Whiteboard
-  whiteboard: 0xecf0f1,
-  whiteboardFrame: 0x8a9aaa,
-  // Lighting
-  ceilingLight: 0xf0e68c,
-  lampGlow: 0xfff8e1,
-};
+import {
+  type AssetPack,
+  type FurnitureItemConfig,
+  getActivePack,
+  listAssetPacks,
+  resolveEmployeeSheetUrl,
+  normalizeFurnitureItem,
+  furnitureItemUrl,
+} from "../lib/assetPack";
+import { P, TILE, drawBuiltinFurniture } from "./FurnitureGen";
 
 interface DustMote {
   x: number;
@@ -82,33 +30,40 @@ interface DustMote {
   maxLife: number;
 }
 
+export type BuiltinFurnitureType =
+  | "desk"
+  | "plant"
+  | "whiteboard"
+  | "bookshelf"
+  | "coffee-machine"
+  | "water-cooler"
+  | "printer"
+  | "filing-cabinet"
+  | "couch"
+  | "standing-lamp"
+  | "wall-clock"
+  | "coat-rack"
+  | "snack-machine"
+  | "cactus"
+  | "tv"
+  | "ping-pong"
+  | "trash-can"
+  | "server-rack"
+  | "fire-extinguisher"
+  | "umbrella-stand"
+  | "mini-fridge"
+  | "fan";
+
 export interface FurnitureItem {
   id: string;
-  type:
-    | "desk"
-    | "plant"
-    | "whiteboard"
-    | "bookshelf"
-    | "coffee-machine"
-    | "water-cooler"
-    | "printer"
-    | "filing-cabinet"
-    | "couch"
-    | "standing-lamp"
-    | "wall-clock"
-    | "coat-rack"
-    | "snack-machine"
-    | "cactus"
-    | "tv"
-    | "ping-pong"
-    | "trash-can"
-    | "server-rack"
-    | "fire-extinguisher"
-    | "umbrella-stand"
-    | "mini-fridge"
-    | "fan";
+  type: BuiltinFurnitureType | string; // string for custom types from packs
   x: number; // tile x
   y: number; // tile y
+  rotation?: number; // 0, 90, 180, 270
+  custom?: boolean; // true = from asset pack
+  customKey?: string; // key into pack furniture items
+  isDesk?: boolean; // true = agents work here (for custom furniture)
+  removed?: boolean; // tombstone: default item was deleted by user
 }
 
 export class OfficeScene extends Phaser.Scene {
@@ -140,6 +95,7 @@ export class OfficeScene extends Phaser.Scene {
       color: string;
       thought: string;
       collaboratingWith?: string;
+      spriteSheet: string;
     }
   > = new Map();
   private collaborationLines: Map<string, Phaser.GameObjects.Graphics> =
@@ -164,6 +120,17 @@ export class OfficeScene extends Phaser.Scene {
   private windowBeamZones: { x: number; y1: number; y2: number; w: number }[] =
     [];
 
+  // ── Removed default furniture (persisted so they don't respawn on rebuild) ──
+  private removedFurnitureIds: Set<string> = new Set();
+
+  // ── Asset pack ──
+  private activePack: AssetPack | null = null;
+  private cachedSheets: Map<string, HTMLCanvasElement> = new Map();
+  private cachedFurniture: Map<string, HTMLCanvasElement> = new Map();
+  private furnitureConfigs: Map<string, FurnitureItemConfig & { desk: boolean }> = new Map();
+  private cachedBackground: HTMLCanvasElement | null = null;
+  private backgroundMode: "stretch" | "tile" | "cover" = "cover";
+
   constructor() {
     super({ key: "OfficeScene" });
   }
@@ -183,10 +150,102 @@ export class OfficeScene extends Phaser.Scene {
   /** Load a saved furniture layout. Must be called before create(). */
   setFurnitureLayout(layout: FurnitureItem[]) {
     this.savedLayout = layout;
+    // Derive removed default furniture: IDs explicitly marked as removed
+    this.removedFurnitureIds = new Set(
+      (layout as (FurnitureItem & { removed?: boolean })[])
+        .filter((f) => f.removed)
+        .map((f) => f.id),
+    );
   }
 
   preload() {
     // All graphics are procedurally generated — no external assets needed
+  }
+
+  /** Load the active asset pack (if any) and pre-fetch its sprite sheets. */
+  async loadAssetPack(): Promise<void> {
+    try {
+      const activeId = await getActivePack();
+      if (!activeId) {
+        this.activePack = null;
+        this.cachedSheets.clear();
+        return;
+      }
+      const packs = await listAssetPacks();
+      const pack = packs.find((p) => p.id === activeId) ?? null;
+      if (!pack?.manifest.categories.employees) {
+        this.activePack = null;
+        this.cachedSheets.clear();
+        return;
+      }
+      this.activePack = pack;
+      // Pre-fetch all employee sheets
+      const sheets = pack.manifest.categories.employees.sheets;
+      const entries = Object.entries(sheets);
+      const loaded = await Promise.all(
+        entries.map(async ([role, relPath]) => {
+          const url = `user-assets://${pack.id}/${relPath}`;
+          try {
+            const canvas = await loadSpriteSheetImage(url);
+            return [role, canvas] as const;
+          } catch {
+            console.warn(`[assets] Failed to load sheet: ${url}`);
+            return null;
+          }
+        }),
+      );
+      this.cachedSheets.clear();
+      for (const entry of loaded) {
+        if (entry) this.cachedSheets.set(entry[0], entry[1]);
+      }
+
+      // Pre-fetch furniture images
+      this.cachedFurniture.clear();
+      this.furnitureConfigs.clear();
+      const furnitureCat = pack.manifest.categories.furniture;
+      if (furnitureCat) {
+        const furEntries = Object.entries(furnitureCat.items);
+        const furLoaded = await Promise.all(
+          furEntries.map(async ([key, entry]) => {
+            const config = normalizeFurnitureItem(key, entry);
+            const url = furnitureItemUrl(pack.id, config);
+            try {
+              const canvas = await loadSpriteSheetImage(url);
+              return [key, canvas, config] as const;
+            } catch {
+              console.warn(`[assets] Failed to load furniture: ${url}`);
+              return null;
+            }
+          }),
+        );
+        for (const entry of furLoaded) {
+          if (entry) {
+            this.cachedFurniture.set(entry[0], entry[1]);
+            this.furnitureConfigs.set(entry[0], entry[2]);
+          }
+        }
+      }
+      // Pre-fetch background image
+      this.cachedBackground = null;
+      const bgCat = pack.manifest.categories.background;
+      if (bgCat) {
+        const bgConfig = typeof bgCat === "string" ? { file: bgCat } : bgCat;
+        this.backgroundMode = bgConfig.mode ?? "cover";
+        const bgUrl = `user-assets://${pack.id}/${bgConfig.file}`;
+        try {
+          this.cachedBackground = await loadSpriteSheetImage(bgUrl);
+        } catch {
+          console.warn(`[assets] Failed to load background: ${bgUrl}`);
+        }
+      }
+    } catch (err) {
+      console.warn("[assets] Failed to load asset pack:", err);
+      this.activePack = null;
+      this.cachedSheets.clear();
+      this.cachedFurniture.clear();
+      this.furnitureConfigs.clear();
+      this.cachedBackground = null;
+    }
   }
 
   create() {
@@ -195,6 +254,48 @@ export class OfficeScene extends Phaser.Scene {
     this.createAllFurniture();
     this.initDustParticles();
     this.ready = true;
+
+    // Load asset pack in the background — re-render agents and restore
+    // custom furniture once pack images are cached.
+    this.loadAssetPack().then(() => {
+      if (this.activePack) {
+        // Restore custom pack furniture that couldn't load earlier (cache was empty)
+        if (this.savedLayout && this.cachedFurniture.size > 0) {
+          for (const item of this.savedLayout) {
+            if (
+              item.custom &&
+              item.customKey &&
+              this.cachedFurniture.has(item.customKey) &&
+              !this.furnitureContainers.has(item.id)
+            ) {
+              const config = this.furnitureConfigs.get(item.customKey);
+              this.createFurnitureContainer(item.id, item.type, item.x, item.y, {
+                custom: true,
+                customKey: item.customKey,
+                isDesk: item.isDesk ?? config?.desk ?? false,
+                rotation: item.rotation,
+              });
+            }
+          }
+          this.rebuildDeskPositions();
+          this.persistFurniture();
+        }
+        if (this.agentSprites.size > 0) {
+          this.fullRebuildAgents();
+        }
+      }
+    });
+
+    // Dismiss furniture edit on click outside
+    this.input.on("pointerdown", (_pointer: Phaser.Input.Pointer, targets: Phaser.GameObjects.GameObject[]) => {
+      if (!this.editingFurnitureId) return;
+      const editContainer = this.furnitureContainers.get(this.editingFurnitureId);
+      const isOnOverlay = targets.some((t) => this.editOverlayObjects.includes(t));
+      const isOnFurniture = targets.includes(editContainer!);
+      if (!isOnOverlay && !isOnFurniture) {
+        this.dismissFurnitureEdit();
+      }
+    });
 
     // Enable drag input
     this.input.on(
@@ -222,6 +323,11 @@ export class OfficeScene extends Phaser.Scene {
       ) => {
         this.isDragging = true;
         this.dragTarget = gameObject;
+        this.dismissFurnitureEdit();
+        if (this.longPressTimer) {
+          clearTimeout(this.longPressTimer);
+          this.longPressTimer = undefined;
+        }
         gameObject.setDepth(50);
         // Lift effect
         this.tweens.add({
@@ -312,7 +418,7 @@ export class OfficeScene extends Phaser.Scene {
             item.x = snapped.tileX;
             item.y = snapped.tileY;
             // If a desk was moved, reassign agents to new desk positions
-            if (item.type === 'desk') {
+            if (item.type === 'desk' || item.isDesk) {
               this.rebuildDeskPositions();
               this.assignDesks();
               // Re-walk any working agents to their (possibly new) desk
@@ -322,9 +428,7 @@ export class OfficeScene extends Phaser.Scene {
                 }
               }
             }
-            if (this.onFurnitureMove) {
-              this.onFurnitureMove([...this.furnitureItems]);
-            }
+            this.persistFurniture();
           }
         }
       },
@@ -343,11 +447,35 @@ export class OfficeScene extends Phaser.Scene {
       this.fullRebuildAgents();
     }
 
+    // Hot-swap asset pack when user changes it in the UI
+    const onPackChanged = () => {
+      this.loadAssetPack().then(() => {
+        // Rebuild the full scene to apply background + sprite changes
+        this.rebuildAll();
+      });
+    };
+    window.addEventListener("asset-pack-changed", onPackChanged);
+
+    // Add/remove custom furniture from the Assets modal
+    const onFurnitureAdd = (e: Event) => {
+      const { key } = (e as CustomEvent).detail;
+      this.addFurniture(key);
+    };
+    const onFurnitureRemove = (e: Event) => {
+      const { id } = (e as CustomEvent).detail;
+      this.removeFurniture(id);
+    };
+    window.addEventListener("furniture-add", onFurnitureAdd);
+    window.addEventListener("furniture-remove", onFurnitureRemove);
+
     this.events.on("shutdown", () => {
       if (this.resizeTimer) {
         clearTimeout(this.resizeTimer);
         this.resizeTimer = undefined;
       }
+      window.removeEventListener("asset-pack-changed", onPackChanged);
+      window.removeEventListener("furniture-add", onFurnitureAdd);
+      window.removeEventListener("furniture-remove", onFurnitureRemove);
     });
   }
 
@@ -399,6 +527,73 @@ export class OfficeScene extends Phaser.Scene {
 
   // ── Public API ──
 
+  /** All known builtin furniture types. */
+  static readonly BUILTIN_FURNITURE: { type: BuiltinFurnitureType; label: string; isDesk?: boolean }[] = [
+    { type: "desk", label: "Desk", isDesk: true },
+    { type: "plant", label: "Plant" },
+    { type: "whiteboard", label: "Whiteboard" },
+    { type: "bookshelf", label: "Bookshelf" },
+    { type: "coffee-machine", label: "Coffee Machine" },
+    { type: "water-cooler", label: "Water Cooler" },
+    { type: "printer", label: "Printer" },
+    { type: "filing-cabinet", label: "Filing Cabinet" },
+    { type: "couch", label: "Couch" },
+    { type: "standing-lamp", label: "Standing Lamp" },
+    { type: "wall-clock", label: "Wall Clock" },
+    { type: "coat-rack", label: "Coat Rack" },
+    { type: "snack-machine", label: "Snack Machine" },
+    { type: "cactus", label: "Cactus" },
+    { type: "tv", label: "TV" },
+    { type: "ping-pong", label: "Ping Pong" },
+    { type: "trash-can", label: "Trash Can" },
+    { type: "server-rack", label: "Server Rack" },
+    { type: "fire-extinguisher", label: "Fire Extinguisher" },
+    { type: "umbrella-stand", label: "Umbrella Stand" },
+    { type: "mini-fridge", label: "Mini Fridge" },
+    { type: "fan", label: "Fan" },
+  ];
+
+  /** Add furniture to the office — works for both builtin types and custom pack items. */
+  addFurniture(key: string) {
+    const id = `added-${key}-${Date.now()}`;
+    const tileX = Math.floor(this.cols / 2);
+    const tileY = Math.floor(this.rows / 2);
+
+    // Check if it's a custom pack item
+    if (this.cachedFurniture.has(key)) {
+      const config = this.furnitureConfigs.get(key);
+      this.createFurnitureContainer(id, key, tileX, tileY, {
+        custom: true,
+        customKey: key,
+        isDesk: config?.desk ?? false,
+      });
+    } else {
+      // Builtin type
+      const builtin = OfficeScene.BUILTIN_FURNITURE.find((b) => b.type === key);
+      this.createFurnitureContainer(id, key as BuiltinFurnitureType, tileX, tileY, {
+        isDesk: builtin?.isDesk,
+      });
+    }
+    this.rebuildDeskPositions();
+    this.persistFurniture();
+  }
+
+  /** Remove a furniture item by ID (works for defaults, added builtins, and custom). */
+  removeFurniture(id: string) {
+    const container = this.furnitureContainers.get(id);
+    if (container) {
+      container.destroy();
+      this.furnitureContainers.delete(id);
+    }
+    const isDefault = !id.startsWith("added-") && !id.startsWith("custom-");
+    if (isDefault) {
+      this.removedFurnitureIds.add(id);
+    }
+    this.furnitureItems = this.furnitureItems.filter((f) => f.id !== id);
+    this.rebuildDeskPositions();
+    this.persistFurniture();
+  }
+
   updateAgents(agents: Agent[]) {
     const prev = this.agents;
     this.agents = agents;
@@ -422,7 +617,8 @@ export class OfficeScene extends Phaser.Scene {
       } else if (
         snap.name !== agent.name ||
         snap.role !== agent.role ||
-        snap.color !== agent.color
+        snap.color !== agent.color ||
+        snap.spriteSheet !== (agent.spriteSheet ?? "")
       ) {
         toRebuild.add(agent.id);
       } else if (
@@ -464,6 +660,7 @@ export class OfficeScene extends Phaser.Scene {
           color: agent.color,
           thought: agent.currentThought ?? "",
           collaboratingWith: agent.collaboratingWith,
+          spriteSheet: agent.spriteSheet ?? "",
         });
         const container = this.agentSprites.get(agent.id);
         if (container) {
@@ -577,11 +774,63 @@ export class OfficeScene extends Phaser.Scene {
   // ── Office background (floor, walls, rug, windows — non-interactive) ──
 
   private drawOffice() {
-    const g = this.add.graphics();
-    this.officeGraphics = g;
     const { cols, rows } = this;
     const W = this.scale.gameSize.width;
     const H = this.scale.gameSize.height;
+
+    // Custom background from asset pack
+    if (this.cachedBackground) {
+      const texKey = "_custom_bg";
+      if (this.textures.exists(texKey)) this.textures.remove(texKey);
+      this.textures.addImage(
+        texKey,
+        this.cachedBackground as unknown as HTMLImageElement,
+      );
+      const officeW = cols * TILE;
+      const officeH = rows * TILE;
+
+      if (this.backgroundMode === "tile") {
+        // Tile the image across the office area
+        const imgW = this.cachedBackground.width;
+        const imgH = this.cachedBackground.height;
+        for (let y = 0; y < officeH; y += imgH) {
+          for (let x = 0; x < officeW; x += imgW) {
+            const s = this.add.sprite(x, y, texKey);
+            s.setOrigin(0, 0);
+            s.setDepth(0);
+            this.bgObjects.push(s);
+          }
+        }
+      } else {
+        // "cover" (default) or "stretch" — scale to fill the office
+        const bg = this.add.sprite(0, 0, texKey);
+        bg.setOrigin(0, 0);
+        bg.setDepth(0);
+        if (this.backgroundMode === "stretch") {
+          bg.setDisplaySize(officeW, officeH);
+        } else {
+          // Cover: scale to fill while maintaining aspect ratio
+          const scaleX = officeW / this.cachedBackground.width;
+          const scaleY = officeH / this.cachedBackground.height;
+          const scale = Math.max(scaleX, scaleY);
+          bg.setScale(scale);
+        }
+        this.bgObjects.push(bg);
+      }
+
+      // Dead zone fill for area outside the office grid
+      const deadZone = this.add.graphics();
+      deadZone.setDepth(0);
+      deadZone.fillStyle(0x1a1a2a, 1);
+      if (W > officeW) deadZone.fillRect(officeW, 0, W - officeW, H);
+      if (H > officeH) deadZone.fillRect(0, officeH, W, H - officeH);
+      this.bgObjects.push(deadZone);
+      return;
+    }
+
+    // Procedural office background
+    const g = this.add.graphics();
+    this.officeGraphics = g;
 
     // ======= FLOOR — warm wood planks =======
     const plankColors = [P.plank1, P.plank2, P.plank3, P.plank1, P.plank2];
@@ -966,6 +1215,33 @@ export class OfficeScene extends Phaser.Scene {
     // Desk fan
     this.createFurnitureContainer("fan-0", "fan", 4, deskRows[0]);
 
+    // Restore user-added furniture from saved layout (both custom pack and builtin additions)
+    if (this.savedLayout) {
+      for (const item of this.savedLayout) {
+        // Skip items that were already created by the default layout
+        if (this.furnitureContainers.has(item.id)) continue;
+
+        if (item.custom && item.customKey && this.cachedFurniture.has(item.customKey)) {
+          // Custom pack furniture
+          const config = this.furnitureConfigs.get(item.customKey);
+          this.createFurnitureContainer(item.id, item.type, item.x, item.y, {
+            custom: true,
+            customKey: item.customKey,
+            isDesk: item.isDesk ?? config?.desk ?? false,
+            rotation: item.rotation,
+          });
+        } else if (item.id.startsWith("added-")) {
+          // User-added furniture (builtin or custom pack)
+          this.createFurnitureContainer(item.id, item.type, item.x, item.y, {
+            custom: item.custom,
+            customKey: item.customKey,
+            isDesk: item.isDesk,
+            rotation: item.rotation,
+          });
+        }
+      }
+    }
+
     // Build desk chair positions from actual furniture locations
     // (which may have been overridden by saved layout)
     this.rebuildDeskPositions();
@@ -976,93 +1252,109 @@ export class OfficeScene extends Phaser.Scene {
     type: FurnitureItem["type"],
     tileX: number,
     tileY: number,
+    opts?: { custom?: boolean; customKey?: string; isDesk?: boolean; rotation?: number },
   ) {
+    // Skip furniture the user has deleted
+    if (this.removedFurnitureIds.has(id)) return;
+
     // Use saved position if available
     const saved = this.savedLayout?.find((f) => f.id === id);
     if (saved) {
       tileX = saved.x;
       tileY = saved.y;
     }
+    const rotation = saved?.rotation ?? opts?.rotation ?? 0;
 
     const container = this.add.container(tileX * TILE, tileY * TILE);
     container.setDepth(5);
     container.setData("furnitureId", id);
     container.setData("furnitureType", type);
 
-    const g = this.add.graphics();
+    // Custom furniture from asset pack — render PNG
+    const customCanvas = opts?.customKey
+      ? this.cachedFurniture.get(opts.customKey)
+      : undefined;
 
-    switch (type) {
-      case "desk":
-        this.drawDeskGraphics(g);
-        break;
-      case "plant":
-        this.drawPlantGraphics(g);
-        break;
-      case "whiteboard":
-        this.drawWhiteboardGraphics(g);
-        break;
-      case "bookshelf":
-        this.drawBookshelfGraphics(g);
-        break;
-      case "coffee-machine":
-        this.drawCoffeeMachineGraphics(g);
-        break;
-      case "water-cooler":
-        this.drawWaterCoolerGraphics(g);
-        break;
-      case "printer":
-        this.drawPrinterGraphics(g);
-        break;
-      case "filing-cabinet":
-        this.drawFilingCabinetGraphics(g);
-        break;
-      case "couch":
-        this.drawCouchGraphics(g);
-        break;
-      case "standing-lamp":
-        this.drawStandingLampGraphics(g);
-        break;
-      case "wall-clock":
-        this.drawWallClockGraphics(g);
-        break;
-      case "coat-rack":
-        this.drawCoatRackGraphics(g);
-        break;
-      case "snack-machine":
-        this.drawSnackMachineGraphics(g);
-        break;
-      case "cactus":
-        this.drawCactusGraphics(g);
-        break;
-      case "tv":
-        this.drawTvGraphics(g);
-        break;
-      case "ping-pong":
-        this.drawPingPongGraphics(g);
-        break;
-      case "trash-can":
-        this.drawTrashCanGraphics(g);
-        break;
-      case "server-rack":
-        this.drawServerRackGraphics(g);
-        break;
-      case "fire-extinguisher":
-        this.drawFireExtinguisherGraphics(g);
-        break;
-      case "umbrella-stand":
-        this.drawUmbrellaStandGraphics(g);
-        break;
-      case "mini-fridge":
-        this.drawMiniFridgeGraphics(g);
-        break;
-      case "fan":
-        this.drawFanGraphics(g);
-        break;
+    if (customCanvas) {
+      const texKey = `furniture_${id}`;
+      if (this.textures.exists(texKey)) this.textures.remove(texKey);
+      this.textures.addImage(
+        texKey,
+        customCanvas as unknown as HTMLImageElement,
+      );
+      const config = this.furnitureConfigs.get(opts!.customKey!);
+      // Determine tile footprint:
+      // - If manifest specifies tiles, use those
+      // - If image is already at tile scale (dimensions >= TILE), divide by TILE
+      // - Otherwise, infer from aspect ratio: fit into 1-2 tiles
+      let tw: number, th: number;
+      if (config?.tilesWide != null && config?.tilesTall != null) {
+        tw = config.tilesWide;
+        th = config.tilesTall;
+      } else if (customCanvas.width >= TILE * 1.5 || customCanvas.height >= TILE * 1.5) {
+        // Large image — already at tile scale
+        tw = Math.max(1, Math.round(customCanvas.width / TILE));
+        th = Math.max(1, Math.round(customCanvas.height / TILE));
+      } else {
+        // Small pixel art — scale up based on aspect ratio
+        const ratio = customCanvas.width / customCanvas.height;
+        if (ratio > 1.8) {
+          tw = 2; th = 1; // wide
+        } else if (ratio < 0.55) {
+          tw = 1; th = 2; // tall
+        } else if (ratio > 1.2) {
+          tw = 2; th = 1; // somewhat wide
+        } else if (ratio < 0.8) {
+          tw = 1; th = 2; // somewhat tall
+        } else if (customCanvas.width > 50 || customCanvas.height > 50) {
+          tw = 2; th = 2; // biggish square
+        } else {
+          tw = 1; th = 1; // small square
+        }
+      }
+      const sprite = this.add.sprite(0, 0, texKey);
+      sprite.setOrigin(0, 0);
+      sprite.setDisplaySize(tw * TILE, th * TILE);
+      sprite.setAngle(rotation);
+      // Adjust origin for rotation
+      if (rotation === 90) {
+        sprite.setOrigin(0, 1);
+      } else if (rotation === 180) {
+        sprite.setOrigin(1, 1);
+      } else if (rotation === 270) {
+        sprite.setOrigin(1, 0);
+      }
+      container.add(sprite);
+
+      const effW = rotation === 90 || rotation === 270 ? th : tw;
+      const effH = rotation === 90 || rotation === 270 ? tw : th;
+      const hitW = effW * TILE;
+      const hitH = effH * TILE;
+      container.setSize(hitW, hitH);
+      container.setInteractive({ cursor: "pointer" });
+
+      this.addFurnitureInteractions(container, id, hitW);
+
+      this.furnitureContainers.set(id, container);
+      this.furnitureItems.push({
+        id,
+        type,
+        x: tileX,
+        y: tileY,
+        rotation,
+        custom: true,
+        customKey: opts?.customKey,
+        isDesk: opts?.isDesk,
+      });
+      return;
     }
 
-    container.add(g);
+    // Builtin furniture — procedural drawing
+    const g = this.add.graphics();
 
-    // Make interactive and draggable
+    drawBuiltinFurniture(type, g);
+
+    // Determine base tile size
     const wideTypes = new Set([
       "desk",
       "bookshelf",
@@ -1078,889 +1370,381 @@ export class OfficeScene extends Phaser.Scene {
       "filing-cabinet",
       "server-rack",
     ]);
-    const hitW = wideTypes.has(type) ? TILE * 2 : TILE;
-    const hitH = tallTypes.has(type) ? TILE * 2 : TILE;
-    container.setSize(hitW, hitH);
-    container.setInteractive({ cursor: "grab", draggable: true });
-    this.input.setDraggable(container);
+    const baseTW = wideTypes.has(type) ? 2 : 1;
+    const baseTH = tallTypes.has(type) ? 2 : 1;
+    const baseW = baseTW * TILE;
+    const baseH = baseTH * TILE;
 
-    // Hover feedback
-    container.on("pointerover", () => {
-      if (!this.isDragging) {
-        this.tweens.add({
-          targets: container,
-          scaleX: 1.04,
-          scaleY: 1.04,
-          duration: 120,
-          ease: "Quad.easeOut",
-        });
-      }
-    });
-    container.on("pointerout", () => {
-      if (!this.isDragging || this.dragTarget !== container) {
-        this.tweens.add({
-          targets: container,
-          scaleX: 1,
-          scaleY: 1,
-          duration: 120,
-          ease: "Quad.easeOut",
-        });
-      }
-    });
+    // Snapshot the procedural graphics to a texture so rotation works properly
+    const texKey = `builtin_${id}_${rotation}`;
+    if (this.textures.exists(texKey)) this.textures.remove(texKey);
+    const rt = this.add.renderTexture(0, 0, baseW, baseH);
+    rt.draw(g, 0, 0);
+    rt.saveTexture(texKey);
+    rt.destroy();
+    g.destroy();
+
+    const sprite = this.add.sprite(0, 0, texKey);
+    sprite.setOrigin(0, 0);
+    if (rotation) {
+      sprite.setAngle(rotation);
+      if (rotation === 90) sprite.setOrigin(0, 1);
+      else if (rotation === 180) sprite.setOrigin(1, 1);
+      else if (rotation === 270) sprite.setOrigin(1, 0);
+    }
+    container.add(sprite);
+
+    // Effective hit area accounts for rotation swapping width/height
+    const effTW = rotation === 90 || rotation === 270 ? baseTH : baseTW;
+    const effTH = rotation === 90 || rotation === 270 ? baseTW : baseTH;
+    const hitW = effTW * TILE;
+    const hitH = effTH * TILE;
+    container.setSize(hitW, hitH);
+    container.setInteractive({ cursor: "pointer" });
+
+    this.addFurnitureInteractions(container, id, hitW);
 
     this.furnitureContainers.set(id, container);
-    this.furnitureItems.push({ id, type, x: tileX, y: tileY });
+    this.furnitureItems.push({
+      id,
+      type,
+      x: tileX,
+      y: tileY,
+      rotation,
+      custom: opts?.custom,
+      customKey: opts?.customKey,
+      isDesk: opts?.isDesk ?? (type === "desk"),
+    });
+  }
+
+  /** Persist the current furniture layout including tombstones for removed defaults. */
+  private persistFurniture() {
+    if (!this.onFurnitureMove) return;
+    const tombstones = [...this.removedFurnitureIds].map((rid) => ({
+      id: rid,
+      type: "removed" as string,
+      x: 0,
+      y: 0,
+      removed: true,
+    }));
+    this.onFurnitureMove([...this.furnitureItems, ...tombstones] as FurnitureItem[]);
+  }
+
+  // ── Furniture edit mode state ──
+  private editingFurnitureId: string | null = null;
+  private editOverlay: Phaser.GameObjects.Container | null = null;
+  private longPressTimer?: ReturnType<typeof setTimeout>;
+
+  /** Dismiss the current furniture edit overlay. */
+  private dismissFurnitureEdit() {
+    this.stopFurnitureDrag();
+    for (const obj of this.editOverlayObjects) obj.destroy();
+    this.editOverlayObjects = [];
+    this.editOverlay = null;
+    this.editingFurnitureId = null;
+  }
+
+  /** All scene objects belonging to the current edit overlay. */
+  private editOverlayObjects: Phaser.GameObjects.GameObject[] = [];
+
+  /** Manual furniture drag state */
+  private furnitureDragTarget: Phaser.GameObjects.Container | null = null;
+  private furnitureDragOffset = { x: 0, y: 0 };
+  private furnitureDragMoveHandler: ((p: Phaser.Input.Pointer) => void) | null = null;
+  private furnitureDragUpHandler: ((p: Phaser.Input.Pointer) => void) | null = null;
+
+  /** Start a manual drag on a furniture container. */
+  private startFurnitureDrag(
+    container: Phaser.GameObjects.Container,
+    pointer: Phaser.Input.Pointer,
+  ) {
+    this.stopFurnitureDrag();
+    this.furnitureDragTarget = container;
+    this.furnitureDragOffset.x = container.x - pointer.worldX;
+    this.furnitureDragOffset.y = container.y - pointer.worldY;
+    this.isDragging = true;
+
+    container.setDepth(50);
+    this.tweens.add({
+      targets: container,
+      scaleX: 1.15,
+      scaleY: 1.15,
+      duration: 150,
+      ease: "Back.easeOut",
+    });
+    this.showGridOverlay();
+
+    this.dragShadow = this.add.graphics();
+    this.dragShadow.setDepth(49);
+    this.dragShadow.fillStyle(0x000000, 0.2);
+    this.dragShadow.fillCircle(0, 0, 22);
+    this.dragShadow.setPosition(container.x + 3, container.y + 3);
+
+    this.furnitureDragMoveHandler = (p: Phaser.Input.Pointer) => {
+      if (!this.furnitureDragTarget) return;
+      const nx = p.worldX + this.furnitureDragOffset.x;
+      const ny = p.worldY + this.furnitureDragOffset.y;
+      this.furnitureDragTarget.x = nx;
+      this.furnitureDragTarget.y = ny;
+      this.updateGridOverlay(nx, ny);
+      if (this.dragShadow) this.dragShadow.setPosition(nx + 3, ny + 3);
+      if (this.editingFurnitureId) {
+        this.repositionEditOverlay(nx, ny);
+      }
+    };
+
+    this.furnitureDragUpHandler = (_p: Phaser.Input.Pointer) => {
+      this.finishFurnitureDrag();
+    };
+
+    this.input.on("pointermove", this.furnitureDragMoveHandler);
+    this.input.on("pointerup", this.furnitureDragUpHandler);
+  }
+
+  /** Finish manual drag — snap to grid, update position, persist. */
+  private finishFurnitureDrag() {
+    const container = this.furnitureDragTarget;
+    if (!container) return;
+
+    this.hideGridOverlay();
+    if (this.dragShadow) {
+      this.dragShadow.destroy();
+      this.dragShadow = undefined;
+    }
+
+    const snapped = this.snapToGrid(container.x, container.y);
+    this.tweens.add({
+      targets: container,
+      x: snapped.px,
+      y: snapped.py,
+      scaleX: 1,
+      scaleY: 1,
+      duration: 250,
+      ease: "Bounce.easeOut",
+    });
+
+    const fid = container.getData("furnitureId") as string | undefined;
+    if (fid) {
+      const item = this.furnitureItems.find((f) => f.id === fid);
+      if (item) {
+        item.x = snapped.tileX;
+        item.y = snapped.tileY;
+        if (item.type === "desk" || item.isDesk) {
+          this.rebuildDeskPositions();
+          this.assignDesks();
+        }
+        this.persistFurniture();
+      }
+    }
+
+    container.setDepth(5);
+    if (this.editingFurnitureId) {
+      this.repositionEditOverlay(snapped.px, snapped.py);
+    }
+
+    this.stopFurnitureDrag();
+  }
+
+  /** Clean up drag listeners. */
+  private stopFurnitureDrag() {
+    if (this.furnitureDragMoveHandler) {
+      this.input.off("pointermove", this.furnitureDragMoveHandler);
+      this.furnitureDragMoveHandler = null;
+    }
+    if (this.furnitureDragUpHandler) {
+      this.input.off("pointerup", this.furnitureDragUpHandler);
+      this.furnitureDragUpHandler = null;
+    }
+    this.furnitureDragTarget = null;
+    this.isDragging = false;
+  }
+
+  /** Create a button texture via offscreen canvas. */
+  private createButtonTexture(
+    key: string,
+    bgColor: string,
+    label: string,
+    fontSize = "15px",
+  ): string {
+    const canvas = document.createElement("canvas");
+    canvas.width = 22;
+    canvas.height = 22;
+    const ctx = canvas.getContext("2d")!;
+    ctx.fillStyle = bgColor;
+    ctx.beginPath();
+    ctx.roundRect(0, 0, 22, 22, 5);
+    ctx.fill();
+    ctx.fillStyle = "#ffffff";
+    ctx.font = `bold ${fontSize} system-ui, sans-serif`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(label, 11, 12);
+    if (this.textures.exists(key)) this.textures.remove(key);
+    this.textures.addImage(key, canvas as unknown as HTMLImageElement);
+    return key;
+  }
+
+  /** Show the edit overlay (border + rotate + delete) for a furniture item. */
+  private showFurnitureEdit(id: string) {
+    this.dismissFurnitureEdit();
+    const container = this.furnitureContainers.get(id);
+    const item = this.furnitureItems.find((f) => f.id === id);
+    if (!container || !item) return;
+
+    this.editingFurnitureId = id;
+    const cx = container.x;
+    const cy = container.y;
+    const w = container.width;
+    const h = container.height;
+    const objs = this.editOverlayObjects;
+
+    // Dashed border
+    const border = this.add.graphics();
+    border.setDepth(60);
+    border.setPosition(cx, cy);
+    border.lineStyle(2, 0x6366f1, 0.8);
+    const dashLen = 4;
+    const gap = 3;
+    for (const [x1, y1, x2, y2] of [
+      [0, 0, w, 0], [w, 0, w, h], [w, h, 0, h], [0, h, 0, 0],
+    ] as [number, number, number, number][]) {
+      const dx = x2 - x1;
+      const dy = y2 - y1;
+      const len = Math.sqrt(dx * dx + dy * dy);
+      const ux = dx / len;
+      const uy = dy / len;
+      let d = 0;
+      let drawing = true;
+      while (d < len) {
+        const seg = Math.min(drawing ? dashLen : gap, len - d);
+        if (drawing) {
+          border.beginPath();
+          border.moveTo(x1 + ux * d, y1 + uy * d);
+          border.lineTo(x1 + ux * (d + seg), y1 + uy * (d + seg));
+          border.strokePath();
+        }
+        d += seg;
+        drawing = !drawing;
+      }
+    }
+    // Semi-transparent fill
+    border.fillStyle(0x000000, 0.15);
+    border.fillRect(0, 0, w, h);
+    objs.push(border);
+
+    // Buttons in world space
+    const btnY = cy - 14;
+    const btnSpacing = 26;
+    const btnCenterX = cx + w / 2;
+
+    // Rotate button
+    const rotKey = this.createButtonTexture(`_rot_${id}`, "#4f46e5", "↻", "16px");
+    const rotateBtn = this.add.sprite(btnCenterX - btnSpacing / 2, btnY, rotKey);
+    rotateBtn.setDepth(61);
+    rotateBtn.setOrigin(0.5, 0.5);
+    rotateBtn.setInteractive({ cursor: "pointer" });
+    rotateBtn.on("pointerdown", () => {
+      if (!item) return;
+      item.rotation = ((item.rotation ?? 0) + 90) % 360;
+      const sprite = container.list.find(
+        (c): c is Phaser.GameObjects.Sprite => c instanceof Phaser.GameObjects.Sprite,
+      );
+      if (sprite) {
+        sprite.setAngle(item.rotation);
+        if (item.rotation === 90) sprite.setOrigin(0, 1);
+        else if (item.rotation === 180) sprite.setOrigin(1, 1);
+        else if (item.rotation === 270) sprite.setOrigin(1, 0);
+        else sprite.setOrigin(0, 0);
+      }
+      // Swap container hit area to match rotated dimensions
+      const oldW = container.width;
+      const oldH = container.height;
+      container.setSize(oldH, oldW);
+      this.persistFurniture();
+      // Refresh the overlay to match new dimensions
+      this.dismissFurnitureEdit();
+      this.showFurnitureEdit(id);
+    });
+    objs.push(rotateBtn);
+
+    // Delete button
+    const delKey = this.createButtonTexture(`_del_${id}`, "#dc2626", "✕");
+    const deleteBtn = this.add.sprite(btnCenterX + btnSpacing / 2, btnY, delKey);
+    deleteBtn.setDepth(61);
+    deleteBtn.setOrigin(0.5, 0.5);
+    deleteBtn.setInteractive({ cursor: "pointer" });
+    deleteBtn.on("pointerdown", () => {
+      this.dismissFurnitureEdit();
+      this.removeFurniture(id);
+    });
+    objs.push(deleteBtn);
+
+    // Use a dummy container ref so drag tracking can reposition the overlay
+    const overlayRef = this.add.container(0, 0);
+    overlayRef.setVisible(false);
+    objs.push(overlayRef);
+    this.editOverlay = overlayRef;
+  }
+
+  /** Reposition all edit overlay objects to follow a dragged furniture item. */
+  private repositionEditOverlay(cx: number, cy: number) {
+    const objs = this.editOverlayObjects;
+    if (objs.length < 3) return;
+    const container = this.furnitureContainers.get(this.editingFurnitureId!);
+    if (!container) return;
+    const w = container.width;
+    const h = container.height;
+    // border
+    (objs[0] as Phaser.GameObjects.Graphics).setPosition(cx, cy);
+    // rotate btn
+    const btnY = cy - 14;
+    const btnCenterX = cx + w / 2;
+    (objs[1] as Phaser.GameObjects.Sprite).setPosition(btnCenterX - 13, btnY);
+    // delete btn
+    (objs[2] as Phaser.GameObjects.Sprite).setPosition(btnCenterX + 13, btnY);
+  }
+
+  /** Add long-press-to-edit and hover cursor to a furniture container. */
+  private addFurnitureInteractions(
+    container: Phaser.GameObjects.Container,
+    id: string,
+    _hitW: number,
+  ) {
+    // Long press (500ms) opens edit mode
+    container.on("pointerdown", (pointer: Phaser.Input.Pointer) => {
+      if (pointer.rightButtonDown()) return;
+      if (this.longPressTimer) clearTimeout(this.longPressTimer);
+      this.longPressTimer = setTimeout(() => {
+        if (!this.isDragging && pointer.isDown) {
+          this.showFurnitureEdit(id);
+          // Start manual drag immediately — pointer is still held
+          this.startFurnitureDrag(container, pointer);
+        }
+      }, 500);
+    });
+
+    container.on("pointerup", () => {
+      if (this.longPressTimer) {
+        clearTimeout(this.longPressTimer);
+        this.longPressTimer = undefined;
+      }
+    });
+
+    container.on("pointerout", () => {
+      if (this.longPressTimer) {
+        clearTimeout(this.longPressTimer);
+        this.longPressTimer = undefined;
+      }
+    });
   }
 
   private rebuildDeskPositions() {
     this.deskPositions = [];
     for (const item of this.furnitureItems) {
-      if (item.type === "desk") {
+      if (item.type === "desk" || item.isDesk) {
         this.deskPositions.push({ x: item.x + 1, y: item.y + 1 });
       }
     }
-  }
-
-  // ── Furniture drawing helpers (draw at local 0,0 within container) ──
-
-  private drawDeskGraphics(g: Phaser.GameObjects.Graphics) {
-    const dw = TILE * 2;
-    const cx = TILE; // center
-
-    g.fillStyle(0x000000, 0.12);
-    g.fillRect(3, 10, dw, TILE - 6);
-    g.fillStyle(P.deskLeg, 1);
-    g.fillRect(4, 10, 4, TILE - 8);
-    g.fillRect(dw - 8, 10, 4, TILE - 8);
-    g.fillStyle(P.desk, 1);
-    g.fillRect(0, 6, dw, TILE - 10);
-    g.fillStyle(P.deskTop, 1);
-    g.fillRect(0, 0, dw, 8);
-    g.fillStyle(P.deskHighlight, 0.5);
-    g.fillRect(2, 1, dw - 4, 3);
-
-    // Monitor
-    g.fillStyle(P.monitorBezel, 1);
-    g.fillRect(cx - 15, -24, 30, 22);
-    g.fillStyle(P.monitor, 1);
-    g.fillRect(cx - 13, -22, 26, 16);
-    const screenColors = [0x00d4ff, 0x00ff88, 0xff6b9d, 0xffd93d];
-    for (let i = 0; i < 5; i++) {
-      const lineW = 6 + ((i * 7 + 3) % 14);
-      g.fillStyle(screenColors[i % screenColors.length], 0.7);
-      g.fillRect(cx - 11, -20 + i * 3, lineW, 1.5);
-    }
-    g.fillStyle(P.monitorScreen, 0.08);
-    g.fillCircle(cx, -14, 20);
-    g.fillStyle(P.monitorBezel, 1);
-    g.fillRect(cx - 3, -2, 6, 3);
-    g.fillRect(cx - 6, 0, 12, 2);
-
-    // Keyboard
-    g.fillStyle(0x555555, 1);
-    g.fillRect(cx - 10, 2, 20, 5);
-    g.fillStyle(0x666666, 1);
-    g.fillRect(cx - 9, 3, 18, 3);
-    g.fillStyle(0x777777, 0.6);
-    for (let i = 0; i < 5; i++) {
-      g.fillRect(cx - 8 + i * 4, 3.5, 2, 1);
-    }
-
-    // Mouse
-    g.fillStyle(0x555555, 1);
-    g.fillRect(cx + 14, 3, 5, 4);
-    g.fillStyle(0x666666, 1);
-    g.fillRect(cx + 14, 3, 5, 2);
-
-    // Coffee mug
-    g.fillStyle(0xffffff, 0.9);
-    g.fillRect(6, 1, 6, 5);
-    g.fillStyle(0x8b4513, 0.4);
-    g.fillRect(7, 2, 4, 2);
-
-    // Chair
-    g.fillStyle(0x000000, 0.1);
-    g.fillRect(cx - 9, TILE + 4, 20, 16);
-    g.fillStyle(P.chair, 1);
-    g.fillRect(cx - 10, TILE, 20, 18);
-    g.fillStyle(P.chairHighlight, 0.4);
-    g.fillRect(cx - 8, TILE + 2, 16, 6);
-    g.fillStyle(P.chairSeat, 1);
-    g.fillRect(cx - 10, TILE - 3, 20, 6);
-    g.fillStyle(P.chairHighlight, 0.3);
-    g.fillRect(cx - 8, TILE - 2, 16, 3);
-    g.fillStyle(0x333333, 0.6);
-    g.fillCircle(cx - 8, TILE + 18, 2);
-    g.fillCircle(cx + 8, TILE + 18, 2);
-    g.fillCircle(cx, TILE + 19, 2);
-  }
-
-  private drawPlantGraphics(g: Phaser.GameObjects.Graphics) {
-    g.fillStyle(0x000000, 0.1);
-    g.fillCircle(24, 42, 12);
-    g.fillStyle(P.plantPot, 1);
-    g.fillRect(10, 26, 28, 18);
-    g.fillStyle(P.plantPotHighlight, 1);
-    g.fillRect(8, 24, 32, 4);
-    g.fillStyle(P.plantPotHighlight, 0.3);
-    g.fillRect(12, 28, 6, 14);
-    g.fillStyle(0x000000, 0.1);
-    g.fillRect(28, 28, 8, 14);
-    g.fillStyle(0x3d2b1f, 1);
-    g.fillRect(12, 24, 24, 3);
-    g.fillStyle(P.plantDark, 1);
-    g.fillCircle(24, 18, 13);
-    g.fillCircle(15, 22, 9);
-    g.fillCircle(33, 22, 9);
-    g.fillStyle(P.plant, 1);
-    g.fillCircle(24, 14, 12);
-    g.fillCircle(16, 20, 8);
-    g.fillCircle(32, 20, 8);
-    g.fillStyle(P.plantLight, 1);
-    g.fillCircle(22, 10, 6);
-    g.fillCircle(14, 17, 4);
-    g.fillCircle(30, 16, 5);
-    g.fillStyle(0x4daa7f, 0.4);
-    g.fillCircle(20, 8, 3);
-  }
-
-  private drawWhiteboardGraphics(g: Phaser.GameObjects.Graphics) {
-    const bw = TILE * 2;
-    const bh = TILE - 4;
-    g.fillStyle(0x000000, 0.15);
-    g.fillRect(2, 2, bw, bh);
-    g.fillStyle(P.whiteboardFrame, 1);
-    g.fillRect(0, 0, bw, bh);
-    g.fillStyle(P.whiteboard, 1);
-    g.fillRect(4, 4, bw - 8, bh - 8);
-    g.fillStyle(0xffffff, 0.15);
-    g.fillRect(4, 4, bw / 2 - 6, bh / 2 - 6);
-    const noteColors = [0xfff176, 0x80cbc4, 0xef9a9a, 0x90caf9];
-    for (let i = 0; i < 4; i++) {
-      const nx = 8 + (i % 2) * 42;
-      const ny = 8 + Math.floor(i / 2) * 14;
-      g.fillStyle(noteColors[i], 0.85);
-      g.fillRect(nx, ny, 36, 10);
-      g.fillStyle(0x333333, 0.4);
-      g.fillRect(nx + 3, ny + 3, 20 + i * 3, 1.5);
-      g.fillRect(nx + 3, ny + 6, 12 + i * 5, 1.5);
-    }
-    g.fillStyle(0x999999, 1);
-    g.fillRect(20, bh - 2, bw - 40, 3);
-    const markerColors = [0xe74c3c, 0x2ecc71, 0x3498db, 0x1a1a2e];
-    for (let i = 0; i < 4; i++) {
-      g.fillStyle(markerColors[i], 1);
-      g.fillRect(24 + i * 12, bh - 3, 8, 2);
-    }
-  }
-
-  private drawBookshelfGraphics(g: Phaser.GameObjects.Graphics) {
-    const sw = TILE * 2;
-    const sh = TILE;
-    g.fillStyle(0x000000, 0.1);
-    g.fillRect(3, 3, sw, sh);
-    g.fillStyle(P.bookshelf, 1);
-    g.fillRect(0, 0, sw, sh);
-    g.fillStyle(P.bookshelfDark, 1);
-    g.fillRect(0, 0, 3, sh);
-    g.fillRect(sw - 3, 0, 3, sh);
-    g.fillStyle(P.bookshelfDark, 1);
-    g.fillRect(3, sh / 2 - 1, sw - 6, 3);
-    g.fillStyle(0xffffff, 0.08);
-    g.fillRect(0, 0, sw, 2);
-    const books1 = [P.book1, P.book2, P.book3, P.book4, P.book5, P.book6];
-    for (let i = 0; i < 6; i++) {
-      const bh = sh / 2 - 6 + (i % 3) * 2;
-      const bx = 5 + i * 14;
-      g.fillStyle(books1[i], 1);
-      g.fillRect(bx, sh / 2 - bh - 1, 10, bh);
-      g.fillStyle(0xffffff, 0.12);
-      g.fillRect(bx, sh / 2 - bh - 1, 3, bh);
-    }
-    const books2 = [P.book4, P.book1, P.book5, P.book2, P.book6, P.book3];
-    for (let i = 0; i < 6; i++) {
-      const bh = sh / 2 - 6 + ((i + 1) % 3) * 2;
-      const bx = 5 + i * 14;
-      g.fillStyle(books2[i], 1);
-      g.fillRect(bx, sh - bh - 2, 10, bh);
-      g.fillStyle(0xffffff, 0.12);
-      g.fillRect(bx, sh - bh - 2, 3, bh);
-    }
-  }
-
-  private drawCoffeeMachineGraphics(g: Phaser.GameObjects.Graphics) {
-    const x = 4,
-      y = 4;
-    g.fillStyle(0x000000, 0.1);
-    g.fillRect(x + 2, y + 2, 34, 38);
-    g.fillStyle(P.coffee, 1);
-    g.fillRect(x, y, 32, 36);
-    g.fillStyle(P.coffeeHighlight, 0.4);
-    g.fillRect(x + 2, y + 2, 10, 32);
-    g.fillStyle(0x263238, 1);
-    g.fillRect(x + 4, y + 4, 24, 14);
-    g.fillStyle(0x00e676, 0.6);
-    g.fillRect(x + 6, y + 6, 20, 10);
-    g.fillStyle(0x00e676, 0.4);
-    g.fillRect(x + 8, y + 8, 8, 1.5);
-    g.fillRect(x + 8, y + 11, 12, 1.5);
-    g.fillStyle(P.coffeeMetal, 1);
-    g.fillCircle(x + 10, y + 22, 3);
-    g.fillCircle(x + 22, y + 22, 3);
-    g.fillStyle(0xffffff, 0.2);
-    g.fillCircle(x + 9, y + 21, 1.5);
-    g.fillCircle(x + 21, y + 21, 1.5);
-    g.fillStyle(P.coffeeMetal, 1);
-    g.fillRect(x + 4, y + 28, 24, 6);
-    g.fillStyle(0x000000, 0.1);
-    g.fillRect(x + 6, y + 29, 20, 4);
-    // Steam
-    g.fillStyle(0xffffff, 0.08);
-    g.fillCircle(x + 16, y - 4, 4);
-    g.fillCircle(x + 14, y - 10, 3);
-    g.fillCircle(x + 18, y - 14, 2);
-  }
-
-  private drawWaterCoolerGraphics(g: Phaser.GameObjects.Graphics) {
-    g.fillStyle(0x000000, 0.1);
-    g.fillRect(3, 3, 24, 44);
-    g.fillStyle(0xeceff1, 1);
-    g.fillRect(0, 16, 24, 30);
-    g.fillStyle(0xffffff, 0.2);
-    g.fillRect(2, 18, 6, 26);
-    g.fillStyle(0xb3e5fc, 0.5);
-    g.fillRect(4, 0, 16, 18);
-    g.fillStyle(0x0288d1, 1);
-    g.fillRect(6, -2, 12, 3);
-    g.fillStyle(0x4fc3f7, 0.4);
-    g.fillRect(5, 4, 14, 12);
-    g.fillStyle(0xffffff, 0.2);
-    g.fillRect(6, 2, 3, 14);
-    g.fillStyle(P.coffeeMetal, 1);
-    g.fillRect(8, 24, 8, 3);
-    g.fillStyle(0xffffff, 0.8);
-    g.fillRect(9, 30, 6, 6);
-  }
-
-  // ── New furniture drawing methods ──
-
-  private drawPrinterGraphics(g: Phaser.GameObjects.Graphics) {
-    // Shadow
-    g.fillStyle(0x000000, 0.1);
-    g.fillRect(3, 3, 38, 30);
-    // Body
-    g.fillStyle(0xdde0e3, 1);
-    g.fillRect(0, 0, 36, 28);
-    // Top panel darker
-    g.fillStyle(0xc0c4c8, 1);
-    g.fillRect(0, 0, 36, 8);
-    // Paper output slot
-    g.fillStyle(0x333333, 1);
-    g.fillRect(4, 8, 28, 3);
-    // Paper sticking out
-    g.fillStyle(0xffffff, 0.9);
-    g.fillRect(8, 5, 20, 6);
-    // Paper lines
-    g.fillStyle(0xcccccc, 0.5);
-    g.fillRect(10, 7, 12, 1);
-    g.fillRect(10, 9, 8, 1);
-    // Control panel
-    g.fillStyle(0x263238, 1);
-    g.fillRect(6, 14, 14, 8);
-    // LCD display
-    g.fillStyle(0x00e676, 0.5);
-    g.fillRect(7, 15, 12, 4);
-    // Buttons
-    g.fillStyle(0x4caf50, 1);
-    g.fillCircle(26, 18, 3);
-    g.fillStyle(0xf44336, 1);
-    g.fillCircle(26, 24, 2);
-    // Paper tray
-    g.fillStyle(0xb0bec5, 1);
-    g.fillRect(2, 26, 32, 4);
-    // Highlight
-    g.fillStyle(0xffffff, 0.15);
-    g.fillRect(2, 1, 8, 26);
-  }
-
-  private drawFilingCabinetGraphics(g: Phaser.GameObjects.Graphics) {
-    // Shadow
-    g.fillStyle(0x000000, 0.1);
-    g.fillRect(3, 3, 26, 44);
-    // Body
-    g.fillStyle(0x78909c, 1);
-    g.fillRect(0, 0, 24, 42);
-    // Highlight edge
-    g.fillStyle(0x90a4ae, 0.5);
-    g.fillRect(1, 1, 4, 40);
-    // Top drawer
-    g.fillStyle(0x607d8b, 1);
-    g.fillRect(2, 2, 20, 12);
-    g.fillStyle(P.coffeeMetal, 1);
-    g.fillRect(9, 7, 6, 2);
-    // Middle drawer
-    g.fillStyle(0x607d8b, 1);
-    g.fillRect(2, 16, 20, 12);
-    g.fillStyle(P.coffeeMetal, 1);
-    g.fillRect(9, 21, 6, 2);
-    // Bottom drawer
-    g.fillStyle(0x607d8b, 1);
-    g.fillRect(2, 30, 20, 10);
-    g.fillStyle(P.coffeeMetal, 1);
-    g.fillRect(9, 34, 6, 2);
-    // Label on top drawer
-    g.fillStyle(0xffffff, 0.6);
-    g.fillRect(6, 3, 12, 3);
-  }
-
-  private drawCouchGraphics(g: Phaser.GameObjects.Graphics) {
-    // Shadow
-    g.fillStyle(0x000000, 0.1);
-    g.fillRect(3, 3, TILE * 2 - 2, 32);
-    // Couch base
-    g.fillStyle(0x5d4037, 1);
-    g.fillRect(0, 8, TILE * 2 - 4, 24);
-    // Cushions
-    g.fillStyle(0x795548, 1);
-    g.fillRect(2, 4, TILE - 6, 20);
-    g.fillRect(TILE - 2, 4, TILE - 6, 20);
-    // Cushion highlights
-    g.fillStyle(0x8d6e63, 0.5);
-    g.fillRect(4, 6, TILE - 10, 8);
-    g.fillRect(TILE, 6, TILE - 10, 8);
-    // Arm rests
-    g.fillStyle(0x4e342e, 1);
-    g.fillRect(-2, 2, 6, 26);
-    g.fillRect(TILE * 2 - 8, 2, 6, 26);
-    // Arm rest tops
-    g.fillStyle(0x6d4c41, 0.6);
-    g.fillRect(-1, 2, 4, 4);
-    g.fillRect(TILE * 2 - 7, 2, 4, 4);
-    // Back rest
-    g.fillStyle(0x4e342e, 1);
-    g.fillRect(0, -2, TILE * 2 - 4, 8);
-    // Back cushion detail
-    g.fillStyle(0x5d4037, 0.6);
-    g.fillRect(4, 0, TILE * 2 - 12, 4);
-    // Pillow
-    g.fillStyle(0xbcaaa4, 0.8);
-    g.fillRect(6, 6, 12, 10);
-    g.fillStyle(0xd7ccc8, 0.4);
-    g.fillRect(7, 7, 5, 4);
-    // Legs
-    g.fillStyle(0x3e2723, 1);
-    g.fillRect(2, 28, 4, 4);
-    g.fillRect(TILE * 2 - 10, 28, 4, 4);
-  }
-
-  private drawStandingLampGraphics(g: Phaser.GameObjects.Graphics) {
-    // Base
-    g.fillStyle(0x333333, 1);
-    g.fillCircle(16, 42, 8);
-    g.fillStyle(0x444444, 0.5);
-    g.fillCircle(14, 40, 3);
-    // Pole
-    g.fillStyle(0x555555, 1);
-    g.fillRect(14, 4, 4, 38);
-    g.fillStyle(0x666666, 0.4);
-    g.fillRect(15, 4, 1.5, 38);
-    // Shade
-    g.fillStyle(0xfff8e1, 1);
-    g.beginPath();
-    g.moveTo(6, 4);
-    g.lineTo(26, 4);
-    g.lineTo(22, -8);
-    g.lineTo(10, -8);
-    g.closePath();
-    g.fillPath();
-    // Shade detail
-    g.fillStyle(0xfff176, 0.3);
-    g.beginPath();
-    g.moveTo(8, 3);
-    g.lineTo(14, 3);
-    g.lineTo(12, -6);
-    g.lineTo(11, -6);
-    g.closePath();
-    g.fillPath();
-    // Glow
-    g.fillStyle(0xfff8e1, 0.08);
-    g.fillCircle(16, 0, 18);
-    // Bulb hint
-    g.fillStyle(0xffeb3b, 0.4);
-    g.fillCircle(16, 2, 3);
-  }
-
-  private drawWallClockGraphics(g: Phaser.GameObjects.Graphics) {
-    const cx = 16,
-      cy = 16,
-      r = 14;
-    // Shadow
-    g.fillStyle(0x000000, 0.12);
-    g.fillCircle(cx + 1, cy + 1, r + 1);
-    // Frame
-    g.fillStyle(0x5d4037, 1);
-    g.fillCircle(cx, cy, r + 1);
-    // Face
-    g.fillStyle(0xfff8e1, 1);
-    g.fillCircle(cx, cy, r - 1);
-    // Hour markers
-    g.fillStyle(0x333333, 0.8);
-    for (let i = 0; i < 12; i++) {
-      const angle = (i / 12) * Math.PI * 2 - Math.PI / 2;
-      const mx = cx + Math.cos(angle) * (r - 4);
-      const my = cy + Math.sin(angle) * (r - 4);
-      g.fillCircle(mx, my, i % 3 === 0 ? 1.5 : 0.8);
-    }
-    // Hour hand
-    g.lineStyle(2, 0x333333, 1);
-    g.lineBetween(cx, cy, cx + 5, cy - 4);
-    // Minute hand
-    g.lineStyle(1.5, 0x555555, 1);
-    g.lineBetween(cx, cy, cx - 2, cy - 9);
-    // Center dot
-    g.fillStyle(0xc0392b, 1);
-    g.fillCircle(cx, cy, 1.5);
-    // Glass reflection
-    g.fillStyle(0xffffff, 0.1);
-    g.fillCircle(cx - 3, cy - 3, 5);
-  }
-
-  private drawCoatRackGraphics(g: Phaser.GameObjects.Graphics) {
-    // Base
-    g.fillStyle(0x5d4037, 1);
-    g.fillCircle(16, 44, 7);
-    g.fillStyle(0x6d4c41, 0.5);
-    g.fillCircle(14, 42, 3);
-    // Pole
-    g.fillStyle(0x4e342e, 1);
-    g.fillRect(14, 4, 4, 40);
-    g.fillStyle(0x5d4037, 0.4);
-    g.fillRect(15, 4, 1.5, 40);
-    // Top knob
-    g.fillStyle(0x3e2723, 1);
-    g.fillCircle(16, 2, 4);
-    g.fillStyle(0x5d4037, 0.3);
-    g.fillCircle(15, 1, 1.5);
-    // Hooks
-    g.lineStyle(2, 0x4e342e, 1);
-    // Left hook
-    g.lineBetween(14, 10, 6, 10);
-    g.lineBetween(6, 10, 6, 14);
-    // Right hook
-    g.lineBetween(18, 10, 26, 10);
-    g.lineBetween(26, 10, 26, 14);
-    // Middle hooks
-    g.lineBetween(14, 18, 8, 18);
-    g.lineBetween(8, 18, 8, 22);
-    g.lineBetween(18, 18, 24, 18);
-    g.lineBetween(24, 18, 24, 22);
-    // Hanging jacket
-    g.fillStyle(0x37474f, 0.7);
-    g.fillRect(22, 14, 8, 14);
-    g.fillStyle(0x455a64, 0.4);
-    g.fillRect(23, 15, 3, 12);
-    // Hanging hat on left
-    g.fillStyle(0x8d6e63, 0.8);
-    g.fillRect(2, 12, 8, 4);
-    g.fillStyle(0x6d4c41, 1);
-    g.fillRect(3, 10, 6, 3);
-  }
-
-  private drawSnackMachineGraphics(g: Phaser.GameObjects.Graphics) {
-    // Shadow
-    g.fillStyle(0x000000, 0.12);
-    g.fillRect(3, 3, TILE + 4, TILE + 4);
-    // Body
-    g.fillStyle(0xc62828, 1);
-    g.fillRect(0, 0, TILE, TILE);
-    // Body highlight
-    g.fillStyle(0xe53935, 0.3);
-    g.fillRect(2, 2, 10, TILE - 4);
-    // Glass window
-    g.fillStyle(0x263238, 1);
-    g.fillRect(4, 4, TILE - 16, TILE - 14);
-    // Glass reflection
-    g.fillStyle(0xffffff, 0.08);
-    g.fillRect(5, 5, 10, TILE - 16);
-    // Snack rows
-    const snackColors = [0xffeb3b, 0x4caf50, 0x2196f3, 0xff9800, 0xe91e63];
-    for (let row = 0; row < 3; row++) {
-      // Shelf line
-      g.fillStyle(P.coffeeMetal, 0.5);
-      g.fillRect(5, 10 + row * 10, TILE - 18, 1);
-      for (let col = 0; col < 3; col++) {
-        g.fillStyle(snackColors[(row * 3 + col) % snackColors.length], 0.8);
-        g.fillRect(6 + col * 9, 4 + row * 10, 7, 6);
-      }
-    }
-    // Control panel (right side)
-    g.fillStyle(0x424242, 1);
-    g.fillRect(TILE - 12, 4, 10, TILE - 14);
-    // Buttons
-    g.fillStyle(0x76ff03, 0.6);
-    g.fillRect(TILE - 10, 6, 6, 3);
-    // Number pad
-    for (let i = 0; i < 6; i++) {
-      g.fillStyle(0x616161, 1);
-      g.fillRect(TILE - 10 + (i % 2) * 4, 12 + Math.floor(i / 2) * 5, 3, 3);
-    }
-    // Coin slot
-    g.fillStyle(P.coffeeMetal, 1);
-    g.fillRect(TILE - 9, TILE - 12, 4, 6);
-    g.fillStyle(0x333333, 1);
-    g.fillRect(TILE - 8, TILE - 10, 2, 3);
-    // Pickup slot
-    g.fillStyle(0x1a1a1a, 1);
-    g.fillRect(4, TILE - 8, TILE - 16, 6);
-    // "SNACKS" label
-    g.fillStyle(0xffeb3b, 0.7);
-    g.fillRect(8, TILE - 2, 20, 2);
-  }
-
-  private drawCactusGraphics(g: Phaser.GameObjects.Graphics) {
-    // Small terracotta pot
-    g.fillStyle(0x000000, 0.08);
-    g.fillCircle(16, 40, 8);
-    g.fillStyle(0xbf6a3a, 1);
-    g.fillRect(8, 30, 16, 14);
-    g.fillStyle(0xd4844a, 1);
-    g.fillRect(6, 28, 20, 4);
-    g.fillStyle(0xd4844a, 0.3);
-    g.fillRect(10, 32, 4, 10);
-    // Soil
-    g.fillStyle(0x3d2b1f, 1);
-    g.fillRect(9, 28, 14, 3);
-    // Main cactus body
-    g.fillStyle(0x2d8a4e, 1);
-    g.fillRoundedRect(12, 8, 8, 22, 3);
-    // Cactus highlight
-    g.fillStyle(0x3daa6e, 0.5);
-    g.fillRect(13, 10, 3, 18);
-    // Left arm
-    g.fillStyle(0x2d8a4e, 1);
-    g.fillRect(6, 14, 6, 5);
-    g.fillRect(6, 10, 5, 6);
-    g.fillStyle(0x3daa6e, 0.4);
-    g.fillRect(7, 11, 2, 4);
-    // Right arm
-    g.fillStyle(0x2d8a4e, 1);
-    g.fillRect(20, 18, 6, 5);
-    g.fillRect(22, 14, 5, 6);
-    g.fillStyle(0x3daa6e, 0.4);
-    g.fillRect(23, 15, 2, 4);
-    // Spines (tiny dots)
-    g.fillStyle(0xc8e6c9, 0.5);
-    const spinePositions = [
-      [14, 10],
-      [18, 12],
-      [14, 16],
-      [18, 20],
-      [14, 24],
-      [7, 12],
-      [24, 16],
-      [8, 16],
-      [23, 20],
-    ];
-    for (const [sx, sy] of spinePositions) {
-      g.fillCircle(sx, sy, 0.6);
-    }
-    // Flower on top
-    g.fillStyle(0xff4081, 0.9);
-    g.fillCircle(16, 7, 3);
-    g.fillStyle(0xff80ab, 0.6);
-    g.fillCircle(15, 6, 1.5);
-    g.fillStyle(0xffeb3b, 1);
-    g.fillCircle(16, 7, 1);
-  }
-
-  private drawTvGraphics(g: Phaser.GameObjects.Graphics) {
-    const tw = TILE * 2 - 8;
-    // Shadow
-    g.fillStyle(0x000000, 0.12);
-    g.fillRect(3, 3, tw, 30);
-    // Bezel
-    g.fillStyle(0x1a1a2e, 1);
-    g.fillRect(0, 0, tw, 28);
-    // Screen
-    g.fillStyle(0x0a0a1a, 1);
-    g.fillRect(3, 3, tw - 6, 20);
-    // Screen content — chart/dashboard
-    g.fillStyle(0x00d4ff, 0.5);
-    g.fillRect(6, 6, 20, 1.5);
-    g.fillRect(6, 9, 14, 1.5);
-    // Bar chart
-    const bars = [8, 14, 10, 16, 12, 18, 6];
-    for (let i = 0; i < bars.length; i++) {
-      g.fillStyle(i % 2 === 0 ? 0x00d4ff : 0x00ff88, 0.6);
-      g.fillRect(6 + i * 10, 22 - bars[i], 7, bars[i]);
-    }
-    // Screen glow
-    g.fillStyle(0x00d4ff, 0.05);
-    g.fillCircle(tw / 2, 13, 20);
-    // Stand
-    g.fillStyle(0x333344, 1);
-    g.fillRect(tw / 2 - 3, 28, 6, 4);
-    g.fillRect(tw / 2 - 10, 31, 20, 3);
-    // Power LED
-    g.fillStyle(0x00ff00, 0.8);
-    g.fillCircle(tw - 6, 25, 1);
-  }
-
-  private drawPingPongGraphics(g: Phaser.GameObjects.Graphics) {
-    const tw = TILE * 2;
-    // Shadow
-    g.fillStyle(0x000000, 0.1);
-    g.fillRect(4, 4, tw - 4, TILE - 4);
-    // Table top
-    g.fillStyle(0x1b5e20, 1);
-    g.fillRect(0, 4, tw - 4, TILE - 12);
-    // Table border
-    g.lineStyle(2, 0xffffff, 0.8);
-    g.strokeRect(1, 5, tw - 6, TILE - 14);
-    // Center line
-    g.lineStyle(1.5, 0xffffff, 0.8);
-    g.lineBetween(tw / 2 - 2, 5, tw / 2 - 2, TILE - 9);
-    // Net
-    g.fillStyle(0x888888, 0.6);
-    g.fillRect(tw / 2 - 3, 2, 2, TILE - 10);
-    // Net posts
-    g.fillStyle(0x666666, 1);
-    g.fillRect(tw / 2 - 4, 4, 4, 3);
-    g.fillRect(tw / 2 - 4, TILE - 11, 4, 3);
-    // Legs
-    g.fillStyle(0x333333, 1);
-    g.fillRect(4, TILE - 8, 3, 8);
-    g.fillRect(tw - 11, TILE - 8, 3, 8);
-    g.fillRect(4, TILE - 4, 3, 4);
-    g.fillRect(tw - 11, TILE - 4, 3, 4);
-    // Ball
-    g.fillStyle(0xff8f00, 1);
-    g.fillCircle(tw / 2 + 12, 16, 2.5);
-    g.fillStyle(0xffffff, 0.3);
-    g.fillCircle(tw / 2 + 11, 15, 1);
-    // Paddle
-    g.fillStyle(0xc62828, 1);
-    g.fillCircle(15, 20, 5);
-    g.fillStyle(0x5d4037, 1);
-    g.fillRect(13, 24, 4, 8);
-  }
-
-  private drawTrashCanGraphics(g: Phaser.GameObjects.Graphics) {
-    // Shadow
-    g.fillStyle(0x000000, 0.08);
-    g.fillCircle(14, 40, 8);
-    // Body
-    g.fillStyle(0x607d8b, 1);
-    g.fillRect(4, 12, 20, 28);
-    // Slight taper
-    g.fillStyle(0x546e7a, 1);
-    g.fillRect(5, 14, 18, 24);
-    // Rim
-    g.fillStyle(0x78909c, 1);
-    g.fillRect(3, 10, 22, 4);
-    // Highlight
-    g.fillStyle(0x90a4ae, 0.4);
-    g.fillRect(6, 14, 4, 22);
-    // Lid slightly ajar
-    g.fillStyle(0x78909c, 1);
-    g.fillRect(2, 8, 24, 3);
-    g.fillStyle(0x90a4ae, 0.5);
-    g.fillRect(3, 8, 22, 1.5);
-    // Handle on lid
-    g.fillStyle(0x546e7a, 1);
-    g.fillRect(11, 5, 6, 4);
-    g.fillStyle(0x78909c, 0.6);
-    g.fillRect(12, 6, 4, 2);
-    // Trash peeking out
-    g.fillStyle(0xfdd835, 0.4);
-    g.fillRect(8, 9, 5, 3);
-    g.fillStyle(0xffffff, 0.3);
-    g.fillRect(15, 8, 4, 3);
-  }
-
-  private drawServerRackGraphics(g: Phaser.GameObjects.Graphics) {
-    // Shadow
-    g.fillStyle(0x000000, 0.12);
-    g.fillRect(3, 3, 30, TILE + 4);
-    // Body
-    g.fillStyle(0x263238, 1);
-    g.fillRect(0, 0, 28, TILE);
-    // Front panel
-    g.fillStyle(0x37474f, 1);
-    g.fillRect(2, 2, 24, TILE - 4);
-    // Server units (4 rows)
-    for (let i = 0; i < 4; i++) {
-      const sy = 4 + i * 10;
-      g.fillStyle(0x1a1a2e, 1);
-      g.fillRect(3, sy, 22, 8);
-      // Drive bays
-      g.fillStyle(0x455a64, 0.6);
-      for (let j = 0; j < 3; j++) {
-        g.fillRect(4 + j * 7, sy + 1, 5, 6);
-      }
-      // Status LEDs
-      g.fillStyle(i < 3 ? 0x00e676 : 0xff5722, 0.9);
-      g.fillCircle(23, sy + 4, 1.2);
-    }
-    // Ventilation at top
-    g.fillStyle(0x1a1a2e, 0.5);
-    for (let i = 0; i < 4; i++) {
-      g.fillRect(6 + i * 5, TILE - 6, 3, 3);
-    }
-    // Highlight edge
-    g.fillStyle(0x546e7a, 0.3);
-    g.fillRect(1, 1, 3, TILE - 2);
-  }
-
-  private drawFireExtinguisherGraphics(g: Phaser.GameObjects.Graphics) {
-    // Wall bracket
-    g.fillStyle(0x555555, 1);
-    g.fillRect(10, 8, 12, 4);
-    g.fillRect(10, 28, 12, 4);
-    // Body
-    g.fillStyle(0xc62828, 1);
-    g.fillRoundedRect(10, 10, 12, 28, 3);
-    // Body highlight
-    g.fillStyle(0xe53935, 0.4);
-    g.fillRect(11, 12, 4, 24);
-    // Label
-    g.fillStyle(0xffffff, 0.8);
-    g.fillRect(12, 20, 8, 6);
-    g.fillStyle(0xc62828, 0.5);
-    g.fillRect(13, 21, 6, 1.5);
-    g.fillRect(13, 23, 4, 1.5);
-    // Top valve
-    g.fillStyle(0x333333, 1);
-    g.fillRect(12, 6, 8, 6);
-    // Handle
-    g.fillStyle(0x222222, 1);
-    g.fillRect(20, 6, 6, 3);
-    g.fillRect(23, 6, 3, 8);
-    // Nozzle/hose
-    g.fillStyle(0x111111, 1);
-    g.fillRect(8, 8, 4, 2);
-    g.fillRect(5, 8, 4, 14);
-    g.fillRect(4, 20, 4, 3);
-    // Pressure gauge
-    g.fillStyle(0xffffff, 0.8);
-    g.fillCircle(16, 9, 2.5);
-    g.fillStyle(0x00e676, 0.6);
-    g.fillCircle(16, 9, 1.5);
-  }
-
-  private drawUmbrellaStandGraphics(g: Phaser.GameObjects.Graphics) {
-    // Shadow
-    g.fillStyle(0x000000, 0.08);
-    g.fillCircle(16, 42, 7);
-    // Stand body (cylinder)
-    g.fillStyle(0x5d4037, 1);
-    g.fillRect(8, 22, 16, 22);
-    // Rim
-    g.fillStyle(0x6d4c41, 1);
-    g.fillRect(6, 20, 20, 4);
-    // Highlight
-    g.fillStyle(0x8d6e63, 0.4);
-    g.fillRect(10, 24, 4, 18);
-    // Umbrella 1 — blue
-    g.fillStyle(0x1565c0, 1);
-    g.fillRect(11, 4, 3, 18);
-    g.fillStyle(0x1976d2, 1);
-    g.beginPath();
-    g.moveTo(6, 6);
-    g.lineTo(12, 2);
-    g.lineTo(18, 6);
-    g.closePath();
-    g.fillPath();
-    // Handle
-    g.fillStyle(0x5d4037, 1);
-    g.fillRect(10, 4, 2, 3);
-    // Umbrella 2 — red (behind)
-    g.fillStyle(0xc62828, 0.7);
-    g.fillRect(17, 6, 2, 16);
-    g.fillStyle(0xe53935, 0.6);
-    g.beginPath();
-    g.moveTo(13, 8);
-    g.lineTo(18, 4);
-    g.lineTo(23, 8);
-    g.closePath();
-    g.fillPath();
-  }
-
-  private drawMiniFridgeGraphics(g: Phaser.GameObjects.Graphics) {
-    // Shadow
-    g.fillStyle(0x000000, 0.1);
-    g.fillRect(3, 3, 28, 38);
-    // Body
-    g.fillStyle(0xeceff1, 1);
-    g.fillRect(0, 0, 26, 36);
-    // Door panel
-    g.fillStyle(0xe0e0e0, 1);
-    g.fillRect(2, 2, 22, 32);
-    // Door handle
-    g.fillStyle(0xbdbdbd, 1);
-    g.fillRect(20, 10, 3, 10);
-    g.fillStyle(0xffffff, 0.3);
-    g.fillRect(20, 11, 1.5, 8);
-    // Door seal line
-    g.lineStyle(1, 0xbdbdbd, 0.5);
-    g.lineBetween(2, 16, 22, 16);
-    // Top section (freezer)
-    g.fillStyle(0xbbdefb, 0.3);
-    g.fillRect(3, 3, 20, 12);
-    // Bottom section
-    g.fillStyle(0xffffff, 0.1);
-    g.fillRect(3, 18, 20, 14);
-    // Brand logo dot
-    g.fillStyle(0x1976d2, 0.6);
-    g.fillCircle(13, 28, 2);
-    // Highlight
-    g.fillStyle(0xffffff, 0.15);
-    g.fillRect(3, 3, 5, 30);
-    // Feet
-    g.fillStyle(0x616161, 1);
-    g.fillRect(2, 36, 4, 2);
-    g.fillRect(20, 36, 4, 2);
-  }
-
-  private drawFanGraphics(g: Phaser.GameObjects.Graphics) {
-    // Base
-    g.fillStyle(0x455a64, 1);
-    g.fillRect(6, 34, 20, 6);
-    g.fillStyle(0x546e7a, 0.5);
-    g.fillRect(8, 34, 16, 3);
-    // Neck
-    g.fillStyle(0x607d8b, 1);
-    g.fillRect(14, 18, 4, 16);
-    // Cage circle
-    g.lineStyle(1.5, 0x78909c, 1);
-    g.strokeCircle(16, 12, 12);
-    // Cage grill lines
-    g.lineStyle(0.8, 0x90a4ae, 0.5);
-    for (let i = -10; i <= 10; i += 4) {
-      const dx = Math.sqrt(144 - i * i);
-      g.lineBetween(16 + i, 12 - dx, 16 + i, 12 + dx);
-    }
-    // Center hub
-    g.fillStyle(0x455a64, 1);
-    g.fillCircle(16, 12, 3);
-    g.fillStyle(0x546e7a, 0.5);
-    g.fillCircle(15, 11, 1.2);
-    // Blades (3 blades)
-    g.fillStyle(0xb0bec5, 0.6);
-    for (let i = 0; i < 3; i++) {
-      const angle = (i / 3) * Math.PI * 2 - Math.PI / 6;
-      const bx = 16 + Math.cos(angle) * 8;
-      const by = 12 + Math.sin(angle) * 8;
-      g.beginPath();
-      g.moveTo(16, 12);
-      g.lineTo(bx - Math.sin(angle) * 3, by + Math.cos(angle) * 3);
-      g.lineTo(bx + Math.sin(angle) * 3, by - Math.cos(angle) * 3);
-      g.closePath();
-      g.fillPath();
-    }
-    // Speed button
-    g.fillStyle(0x00e676, 0.7);
-    g.fillCircle(16, 38, 2);
   }
 
   // ── Agent sprites ──
@@ -2055,6 +1839,32 @@ export class OfficeScene extends Phaser.Scene {
     }
   }
 
+  /**
+   * Resolve a cached sprite sheet canvas for an agent.
+   * Priority: per-agent override → exact role match → hash-based rotation.
+   */
+  private resolveSheetForAgent(agent: Agent): HTMLCanvasElement | null {
+    if (!this.activePack || this.cachedSheets.size === 0) return null;
+
+    // Per-agent override (set in AgentEditor)
+    if (agent.spriteSheet && this.cachedSheets.has(agent.spriteSheet)) {
+      return this.cachedSheets.get(agent.spriteSheet)!;
+    }
+
+    // Exact role match
+    const role = agent.role.toLowerCase();
+    if (this.cachedSheets.has(role)) return this.cachedSheets.get(role)!;
+
+    // Distribute sheets across agents using a stable hash of the agent ID
+    const sheetKeys = [...this.cachedSheets.keys()];
+    let hash = 0;
+    for (let i = 0; i < agent.id.length; i++) {
+      hash = ((hash << 5) - hash + agent.id.charCodeAt(i)) | 0;
+    }
+    const idx = Math.abs(hash) % sheetKeys.length;
+    return this.cachedSheets.get(sheetKeys[idx]) ?? null;
+  }
+
   private createAgentSprite(agent: Agent) {
     const px = agent.position.x * TILE + TILE / 2;
     const py = agent.position.y * TILE + TILE / 2;
@@ -2080,10 +1890,25 @@ export class OfficeScene extends Phaser.Scene {
     highlight.setVisible(agent.id === this.selectedAgentId);
     container.add(highlight);
 
-    // Generate sprite sheet from agent color
-    const shirtColor = parseInt(agent.color.replace("#", ""), 16);
-    const palette = buildPalette(shirtColor, this.agentIndex++);
-    const animKeys = registerAgentTextures(this, agent.id, palette);
+    // Generate or load sprite sheet
+    let animKeys: Record<AnimState, string>;
+    const sheetCanvas = this.resolveSheetForAgent(agent);
+    if (sheetCanvas) {
+      const employees = this.activePack!.manifest.categories.employees!;
+      animKeys = registerAgentFromSheet(this, agent.id, sheetCanvas, {
+        frameSize: employees.frameSize,
+        frameWidth: employees.frameWidth,
+        frameHeight: employees.frameHeight,
+        framesPerState: employees.framesPerState,
+        rows: employees.rows,
+        states: employees.states,
+        frameRates: employees.frameRates,
+      });
+    } else {
+      const shirtColor = parseInt(agent.color.replace("#", ""), 16);
+      const palette = buildPalette(shirtColor, this.agentIndex++);
+      animKeys = registerAgentTextures(this, agent.id, palette);
+    }
     this.agentAnimKeys.set(agent.id, animKeys);
 
     // Create animated sprite
@@ -2208,6 +2033,7 @@ export class OfficeScene extends Phaser.Scene {
       color: agent.color,
       thought: agent.currentThought ?? "",
       collaboratingWith: agent.collaboratingWith,
+      spriteSheet: agent.spriteSheet ?? "",
     });
   }
 
@@ -2438,6 +2264,7 @@ export class OfficeScene extends Phaser.Scene {
       color: agent.color,
       thought: agent.currentThought ?? "",
       collaboratingWith: agent.collaboratingWith,
+      spriteSheet: agent.spriteSheet ?? "",
     });
   }
 

@@ -299,6 +299,16 @@ contextBridge.exposeInMainWorld("electronAPI", {
     getReadme: () => ipcRenderer.invoke("music:getReadme"),
   },
 
+  // Asset packs
+  assets: {
+    listPacks: () => ipcRenderer.invoke("assets:listPacks"),
+    getActivePack: () => ipcRenderer.invoke("assets:getActivePack"),
+    setActivePack: (packId) => ipcRenderer.invoke("assets:setActivePack", packId),
+    importPack: () => ipcRenderer.invoke("assets:importPack"),
+    openFolder: () => ipcRenderer.invoke("assets:openFolder"),
+    getReadme: () => ipcRenderer.invoke("assets:getReadme"),
+  },
+
   // Permissions
   permissions: {
     check: (dirPath) => ipcRenderer.invoke("permissions:check", dirPath),

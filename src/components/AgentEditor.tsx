@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Agent, AgentSkill, McpServerInline, SPRITE_KEYS, AGENT_COLORS, SubagentDef } from "../lib/types";
+import { type AssetPack, listAssetPacks, getActivePack } from "../lib/assetPack";
 import {
   writeClaudeAgentFile,
   deleteClaudeAgentFile,
@@ -42,6 +43,19 @@ export default function AgentEditor({
   const [showMcpModal, setShowMcpModal] = useState(false);
   const [globalSkills, setGlobalSkills] = useState<AgentSkill[]>([]);
   const [globalMcpNames, setGlobalMcpNames] = useState<Set<string>>(new Set());
+  const [sheetKeys, setSheetKeys] = useState<string[]>([]);
+
+  // Load available sprite sheets from active asset pack
+  useEffect(() => {
+    (async () => {
+      const activeId = await getActivePack();
+      if (!activeId) return;
+      const packs = await listAssetPacks();
+      const pack = packs.find((p) => p.id === activeId);
+      const sheets = pack?.manifest.categories.employees?.sheets;
+      if (sheets) setSheetKeys(Object.keys(sheets));
+    })();
+  }, []);
 
   // Load global skills and MCP servers
   useEffect(() => {
@@ -312,6 +326,40 @@ export default function AgentEditor({
               />
             ))}
           </div>
+          {sheetKeys.length > 1 && (
+            <div className="mt-2">
+              <p className="text-[9px] text-slate-500 mb-1">Sprite</p>
+              <div className="flex gap-1.5 flex-wrap">
+                <button
+                  onClick={() =>
+                    setDraft((prev) => ({ ...prev, spriteSheet: undefined }))
+                  }
+                  className={`px-2 py-1 rounded text-[10px] border transition-all cursor-pointer ${
+                    !draft.spriteSheet
+                      ? "border-indigo-500 bg-indigo-900/40 text-indigo-200"
+                      : "border-slate-600 bg-slate-700/50 text-slate-400 hover:text-slate-200"
+                  }`}
+                >
+                  Auto
+                </button>
+                {sheetKeys.map((key) => (
+                  <button
+                    key={key}
+                    onClick={() =>
+                      setDraft((prev) => ({ ...prev, spriteSheet: key }))
+                    }
+                    className={`px-2 py-1 rounded text-[10px] border transition-all cursor-pointer ${
+                      draft.spriteSheet === key
+                        ? "border-indigo-500 bg-indigo-900/40 text-indigo-200"
+                        : "border-slate-600 bg-slate-700/50 text-slate-400 hover:text-slate-200"
+                    }`}
+                  >
+                    {key}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
         </Field>
 
         {/* ── Skills (compact) ─────────────────────────────── */}

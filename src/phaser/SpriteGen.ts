@@ -818,3 +818,383 @@ export function registerAgentTextures(
 
   return keys as Record<AnimState, string>;
 }
+
+/**
+ * Load a user-provided PNG sprite sheet and register Phaser textures/anims
+ * for a single agent. The sheet must be laid out as:
+ *   [idle_0][idle_1][walk_0][walk_1][type_0][type_1][think_0][think_1]
+ * Each frame is frameSize × frameSize (default 48).
+ *
+ * Returns the same anim-key map as registerAgentTextures so the rest of
+ * OfficeScene works without changes.
+ */
+/**
+ * Fetch a sprite sheet PNG and return it as a canvas.
+ * Call this during scene init so sheets are ready before agents are created.
+ */
+export async function loadSpriteSheetImage(
+  url: string,
+): Promise<HTMLCanvasElement> {
+  const res = await fetch(url);
+  const blob = await res.blob();
+  const bitmap = await createImageBitmap(blob);
+  const canvas = document.createElement("canvas");
+  canvas.width = bitmap.width;
+  canvas.height = bitmap.height;
+  const ctx = canvas.getContext("2d", { willReadFrequently: true })!;
+  ctx.drawImage(bitmap, 0, 0);
+  return canvas;
+}
+
+/** Default frame rates per animation state. */
+export const DEFAULT_FRAME_RATES: Record<AnimState, number> = {
+  idle: 2,
+  walk: 5,
+  type: 6,
+  think: 2,
+};
+
+export interface SpriteSheetConfig {
+  /** Frame width in pixels (default: auto-detected) */
+  frameWidth?: number;
+  /** Frame height in pixels (default: auto-detected) */
+  frameHeight?: number;
+  /** Shorthand: sets both frameWidth and frameHeight (square frames) */
+  frameSize?: number;
+  /** Frames per animation state (default: auto-detected from columns) */
+  framesPerState?: number;
+  /**
+   * Map animation state → row index in the grid.
+   * Default for grids (4+ rows):  { idle: 0, walk: 2, type: 1, think: 3 }
+   * Default for few rows: rows are reused across states.
+   */
+  rows?: Partial<Record<AnimState, number>>;
+  /**
+   * Order of states in a horizontal strip. Each entry maps a strip position
+   * to an internal state. Defaults to ["idle", "walk", "type", "think"].
+   * E.g. ["idle", "idle", "walk", "think"] to skip the typing animation.
+   */
+  states?: AnimState[];
+  /** Per-state frame rates in FPS. Defaults: idle=2, walk=5, type=6, think=2. */
+  frameRates?: Partial<Record<AnimState, number>>;
+}
+
+/**
+ * Auto-detect the grid layout of a sprite sheet by analysing the image
+ * content. Looks for repeating transparent gutters (columns/rows of mostly
+ * transparent or uniform pixels) to find frame boundaries.
+ *
+ * Falls back to dimension-based heuristic if content analysis fails.
+ */
+function detectGrid(
+  w: number,
+  h: number,
+  imageData?: ImageData,
+): { fw: number; fh: number; cols: number; rows: number } {
+  // ── Content-based detection ──
+  // Sample alpha channel to find columns/rows that are mostly transparent,
+  // which indicate frame boundaries.
+  if (imageData) {
+    const { data } = imageData;
+    const alphaThreshold = 10; // near-transparent
+    const gutterRatio = 0.85; // 85% of pixels in a column/row must be transparent
+
+    // Score each x-coordinate as a potential vertical frame boundary
+    const vScores: number[] = [];
+    for (let x = 0; x < w; x++) {
+      let transparent = 0;
+      for (let y = 0; y < h; y++) {
+        if (data[(y * w + x) * 4 + 3] < alphaThreshold) transparent++;
+      }
+      vScores.push(transparent / h);
+    }
+
+    // Score each y-coordinate as a potential horizontal frame boundary
+    const hScores: number[] = [];
+    for (let y = 0; y < h; y++) {
+      let transparent = 0;
+      for (let x = 0; x < w; x++) {
+        if (data[(y * w + x) * 4 + 3] < alphaThreshold) transparent++;
+      }
+      hScores.push(transparent / w);
+    }
+
+    // Find frame width: look for periodic vertical gutters
+    const fwCandidate = findPeriod(vScores, w, gutterRatio);
+    const fhCandidate = findPeriod(hScores, h, gutterRatio);
+
+    if (fwCandidate > 0 && fhCandidate > 0) {
+      return {
+        fw: fwCandidate,
+        fh: fhCandidate,
+        cols: Math.round(w / fwCandidate),
+        rows: Math.round(h / fhCandidate),
+      };
+    }
+  }
+
+  // ── Fallback: dimension-based heuristic ──
+  let best = { fw: FRAME_PX, fh: FRAME_PX, cols: 1, rows: 1, score: Infinity };
+
+  for (let cols = 2; cols <= 10; cols++) {
+    for (let rows = 1; rows <= 10; rows++) {
+      const fw = Math.floor(w / cols);
+      const fh = Math.floor(h / rows);
+      if (fw < 16 || fw > 128 || fh < 16 || fh > 128) continue;
+
+      const padX = w - fw * cols;
+      const padY = h - fh * rows;
+      if (padX < 0 || padX > Math.max(4, fw * 0.15)) continue;
+      if (padY < 0 || padY > Math.max(4, fh * 0.15)) continue;
+      const padScore = (padX + padY) * 0.5;
+
+      // Only penalise extreme ratios (>2:1)
+      const ratio = Math.max(fw, fh) / Math.min(fw, fh);
+      const ratioScore = ratio > 2 ? (ratio - 2) * 3 : 0;
+
+      // Prefer common grid shapes
+      const shapePenalty =
+        (cols >= 3 && cols <= 8 ? 0 : 3) +
+        (rows >= 3 && rows <= 7 ? 0 : 2);
+
+      // Bonus for 4+ rows (directional sheets)
+      const rowBonus = rows >= 4 ? -1.5 : 0;
+
+      const score = padScore + ratioScore + shapePenalty + rowBonus;
+      if (score < best.score) best = { fw, fh, cols, rows, score };
+    }
+  }
+
+  return best;
+}
+
+/**
+ * Find the most likely frame period in a 1D transparency score array.
+ * Looks for a period P where positions near multiples of P have higher
+ * transparency than the surrounding mid-frame regions.
+ *
+ * Works even when frames are tightly packed (no fully transparent gutters)
+ * by looking for *relative* transparency peaks at boundaries vs midpoints.
+ */
+function findPeriod(
+  scores: number[],
+  length: number,
+  _threshold: number,
+): number {
+  const minSize = 16;
+  const maxSize = 128;
+  let bestPeriod = 0;
+  let bestScore = -Infinity;
+
+  for (let period = minSize; period <= maxSize && period <= length / 2; period++) {
+    const divisions = Math.round(length / period);
+    if (divisions < 2 || divisions > 10) continue;
+
+    // Measure average transparency AT boundaries vs BETWEEN them
+    let boundarySum = 0;
+    let boundaryCount = 0;
+    let midSum = 0;
+    let midCount = 0;
+
+    for (let d = 1; d < divisions; d++) {
+      const pos = Math.round(d * period);
+      if (pos <= 0 || pos >= length) continue;
+      // Sample a ±2px window around the boundary
+      for (let offset = -2; offset <= 2; offset++) {
+        const i = pos + offset;
+        if (i >= 0 && i < length) {
+          boundarySum += scores[i];
+          boundaryCount++;
+        }
+      }
+    }
+
+    for (let d = 0; d < divisions; d++) {
+      const mid = Math.round(d * period + period / 2);
+      // Sample a ±2px window around the midpoint
+      for (let offset = -2; offset <= 2; offset++) {
+        const i = mid + offset;
+        if (i >= 0 && i < length) {
+          midSum += scores[i];
+          midCount++;
+        }
+      }
+    }
+
+    if (boundaryCount === 0 || midCount === 0) continue;
+
+    const avgBoundary = boundarySum / boundaryCount;
+    const avgMid = midSum / midCount;
+
+    // Boundaries should be MORE transparent than midpoints
+    // (i.e. higher transparency score at edges than at centers)
+    const contrast = avgBoundary - avgMid;
+    if (contrast <= 0) continue; // no signal at all
+
+    // Slight preference for more divisions (smaller frames = more animation)
+    const divBonus = divisions * 0.02;
+
+    const score = contrast + divBonus;
+    if (score > bestScore) {
+      bestScore = score;
+      bestPeriod = period;
+    }
+  }
+
+  return bestPeriod;
+}
+
+/**
+ * Register Phaser textures/anims for a single agent from a pre-loaded
+ * sprite sheet canvas.
+ *
+ * Supports arbitrary grid layouts — auto-detects frame size, columns,
+ * and rows from the image dimensions. Handles non-square frames and
+ * scales everything to FRAME_PX for rendering.
+ *
+ * Row-to-state mapping:
+ *   4+ rows: row 0 = idle, row 1 = type, row 2 = walk, row 3 = think
+ *   Fewer rows: rows are reused (row 0 for all if only 1 row, etc.)
+ */
+export function registerAgentFromSheet(
+  scene: Phaser.Scene,
+  agentId: string,
+  sheetCanvas: HTMLCanvasElement,
+  config?: SpriteSheetConfig,
+): Record<AnimState, string> {
+  const w = sheetCanvas.width;
+  const h = sheetCanvas.height;
+
+  // Detect or use configured frame dimensions
+  // Fast path: if dimensions are exact multiples of FRAME_PX, skip detection
+  const exactFit = w % FRAME_PX === 0 && h % FRAME_PX === 0;
+  let grid: { fw: number; fh: number; cols: number; rows: number };
+  if (config?.frameSize || config?.frameWidth || exactFit) {
+    const gfw = config?.frameSize ?? config?.frameWidth ?? FRAME_PX;
+    const gfh = config?.frameSize ?? config?.frameHeight ?? FRAME_PX;
+    grid = { fw: gfw, fh: gfh, cols: Math.round(w / gfw), rows: Math.round(h / gfh) };
+  } else {
+    const ctx = sheetCanvas.getContext("2d", { willReadFrequently: true })!;
+    const imageData = ctx.getImageData(0, 0, w, h);
+    grid = detectGrid(w, h, imageData);
+  }
+  const fw = config?.frameSize ?? config?.frameWidth ?? grid.fw;
+  const fh = config?.frameSize ?? config?.frameHeight ?? grid.fh;
+  const cols = Math.max(1, Math.round(w / fw));
+  const rowCount = Math.max(1, Math.round(h / fh));
+
+  console.log(
+    `[sprites] ${agentId}: ${w}x${h} → ${cols}x${rowCount} grid, frame ${fw}x${fh}`,
+  );
+
+  const isGrid = rowCount >= 4;
+  const allStates: AnimState[] = ["idle", "walk", "type", "think"];
+
+  // State ordering for horizontal strips — configurable via config.states
+  // e.g. ["idle", "walk", "type", "think"] or ["idle", "idle", "walk", "think"]
+  const stripStates: AnimState[] = config?.states ?? allStates;
+
+  const framesPerState = config?.framesPerState ??
+    (isGrid ? cols : Math.max(1, Math.floor(cols / stripStates.length)));
+
+  // Build row map for grid sheets — clamp to available rows
+  const defaultRowMap: Record<AnimState, number> =
+    rowCount >= 4
+      ? { idle: 0, walk: 2, type: 1, think: 3 }
+      : rowCount >= 2
+        ? { idle: 0, walk: 1, type: 0, think: 1 }
+        : { idle: 0, walk: 0, type: 0, think: 0 };
+
+  const rowMap: Record<AnimState, number> = { ...defaultRowMap, ...config?.rows };
+  for (const s of Object.keys(rowMap) as AnimState[]) {
+    rowMap[s] = Math.min(rowMap[s], rowCount - 1);
+  }
+
+  // Per-state frame rates — configurable
+  const rates: Record<AnimState, number> = { ...DEFAULT_FRAME_RATES, ...config?.frameRates };
+
+  const keys: Record<string, string> = {};
+
+  // For strips: iterate through strip positions sequentially
+  // For grids: iterate through the 4 internal states
+  const registered = new Set<AnimState>();
+  let stripOffset = 0;
+
+  const stateSequence = isGrid ? allStates : stripStates;
+
+  for (let i = 0; i < stateSequence.length; i++) {
+    const state = stateSequence[i];
+
+    if (isGrid) {
+      // Grid: each state reads from its own row
+      const key = `agent_${agentId}_${state}`;
+      keys[state] = key;
+
+      const row = rowMap[state];
+      const srcY = row * fh;
+
+      const stateCanvas = document.createElement("canvas");
+      stateCanvas.width = FRAME_PX * framesPerState;
+      stateCanvas.height = FRAME_PX;
+      const sctx = stateCanvas.getContext("2d")!;
+      for (let f = 0; f < framesPerState; f++) {
+        sctx.drawImage(sheetCanvas, f * fw, srcY, fw, fh, f * FRAME_PX, 0, FRAME_PX, FRAME_PX);
+      }
+
+      if (scene.anims.exists(key)) scene.anims.remove(key);
+      if (scene.textures.exists(key)) scene.textures.remove(key);
+      scene.textures.addSpriteSheet(key, stateCanvas as unknown as HTMLImageElement, {
+        frameWidth: FRAME_PX, frameHeight: FRAME_PX,
+      });
+      scene.anims.create({
+        key,
+        frames: scene.anims.generateFrameNumbers(key, { start: 0, end: Math.max(0, framesPerState - 1) }),
+        frameRate: rates[state],
+        repeat: -1,
+      });
+    } else {
+      // Strip: extract frames sequentially, first occurrence defines the anim
+      const actualFrames = Math.min(framesPerState, Math.max(1, cols - stripOffset));
+
+      if (!registered.has(state)) {
+        // First time we see this state — register the animation
+        const key = `agent_${agentId}_${state}`;
+        keys[state] = key;
+
+        const stateCanvas = document.createElement("canvas");
+        stateCanvas.width = FRAME_PX * actualFrames;
+        stateCanvas.height = FRAME_PX;
+        const sctx = stateCanvas.getContext("2d")!;
+        for (let f = 0; f < actualFrames; f++) {
+          sctx.drawImage(
+            sheetCanvas, (stripOffset + f) * fw, 0, fw, fh,
+            f * FRAME_PX, 0, FRAME_PX, FRAME_PX,
+          );
+        }
+
+        if (scene.anims.exists(key)) scene.anims.remove(key);
+        if (scene.textures.exists(key)) scene.textures.remove(key);
+        scene.textures.addSpriteSheet(key, stateCanvas as unknown as HTMLImageElement, {
+          frameWidth: FRAME_PX, frameHeight: FRAME_PX,
+        });
+        scene.anims.create({
+          key,
+          frames: scene.anims.generateFrameNumbers(key, { start: 0, end: Math.max(0, actualFrames - 1) }),
+          frameRate: rates[state],
+          repeat: -1,
+        });
+        registered.add(state);
+      }
+      // Always advance the strip offset (even for duplicates — those frames are skipped)
+      stripOffset += actualFrames;
+    }
+  }
+
+  // Fill any missing states by copying from idle (or the first registered state)
+  const fallback = keys["idle"] ?? Object.values(keys)[0];
+  for (const s of allStates) {
+    if (!keys[s] && fallback) keys[s] = fallback;
+  }
+
+  return keys as Record<AnimState, string>;
+}

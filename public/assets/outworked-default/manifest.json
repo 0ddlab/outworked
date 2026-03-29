@@ -1,0 +1,79 @@
+{
+  "name": "Outworked Default",
+  "author": "Outworked",
+  "version": "1.0",
+  "_docs": {
+    "overview": "This is an example asset pack. Copy this folder to create your own!",
+    "employees": {
+      "how_it_works": "Each sheet is a horizontal PNG strip of animation frames, read left-to-right.",
+      "frame_order": "Frames are grouped by state. Default order: idle, walk, type, think.",
+      "example_8_frames": "[idle_0][idle_1][walk_0][walk_1][type_0][type_1][think_0][think_1]",
+      "framesPerState": "Number of frames per animation state (e.g. 2 means 2 idle + 2 walk + 2 type + 2 think = 8 total).",
+      "states": "Optional. Override the order of states in the strip. E.g. ['walk', 'idle', 'type', 'think']. Missing states fall back to idle.",
+      "states_reuse": "Reuse a state for multiple positions: ['idle', 'walk', 'walk', 'idle'] if your sheet only has 2 unique animations.",
+      "frameRates": "Optional. Per-state FPS: { idle: 2, walk: 5, type: 6, think: 2 }. Override any or all.",
+      "grid_sheets": "Multi-row sheets are also supported. Each row = one state. Set 'rows' to map states to row indices.",
+      "rows_example": "{ 'idle': 0, 'walk': 1, 'type': 2, 'think': 3 }",
+      "sheets": "Map of role name -> PNG file. 'default' is used when no role matches. Agents are assigned sheets by role name, or distributed randomly if no match.",
+      "frameSize": "Optional. Width & height of each frame in pixels. Auto-detected if omitted.",
+      "frameWidth_frameHeight": "Optional. Use instead of frameSize for non-square frames."
+    },
+    "furniture": {
+      "how_it_works": "Each item is a single PNG image (not a sprite sheet).",
+      "sizing": "Images are scaled to fit the tile grid (48px per tile). Dimensions auto-detected, or set tilesWide/tilesTall.",
+      "desk_detection": "Items named 'desk', 'desk_*', or 'desk-*' are auto-detected as desks. Or set 'desk': true.",
+      "desks": "Desk items are work stations where agents sit when working."
+    },
+    "background": {
+      "how_it_works": "A single PNG that replaces the entire office floor, walls, and windows.",
+      "modes": "'cover' (default) scales to fill maintaining aspect ratio. 'stretch' distorts to fit. 'tile' repeats the image.",
+      "recommended_size": "768x480 or larger for best quality (matches default 16x10 tile grid)."
+    }
+  },
+  "categories": {
+    "employees": {
+      "framesPerState": 2,
+      "_state_order": "idle, walk, type, think (left-to-right in the strip)",
+      "sheets": {
+        "default": "employees/default.png",
+        "engineer": "employees/engineer.png",
+        "designer": "employees/designer.png",
+        "manager": "employees/manager.png"
+      }
+    },
+    "furniture": {
+      "items": {
+        "desk": {
+          "file": "furniture/desk.png",
+          "desk": true,
+          "tilesWide": 2,
+          "tilesTall": 1
+        },
+        "plant": {
+          "file": "furniture/plant.png"
+        },
+        "bookshelf": {
+          "file": "furniture/bookshelf.png",
+          "tilesWide": 2,
+          "tilesTall": 1
+        },
+        "couch": {
+          "file": "furniture/couch.png",
+          "tilesWide": 2,
+          "tilesTall": 1
+        },
+        "coffee_machine": {
+          "file": "furniture/coffee_machine.png"
+        }
+      }
+    },
+    "background": {
+      "file": "background.png",
+      "mode": "stretch"
+    },
+    "font": {
+      "file": "Merriweather.ttf",
+      "name": "Merriweather"
+    }
+  }
+}

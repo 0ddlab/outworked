@@ -41,7 +41,8 @@
   <a href="#features"><strong>Features</strong></a> ·
   <a href="#skills"><strong>Skills</strong></a> ·
   <a href="#mcp-servers"><strong>MCP Servers</strong></a> ·
-  <a href="#channels--triggers"><strong>Channels & Triggers</strong></a>
+  <a href="#channels--triggers"><strong>Channels & Triggers</strong></a> ·
+  <a href="#asset-packs--customize-your-office"><strong>Asset Packs</strong></a>
 </p>
 
 ---
@@ -147,6 +148,7 @@ Three agents working simultaneously, finishing in minutes what would take you pr
 - **Background Mode** — Minimize and let agents keep working. Tray icon keeps you updated
 - **Parallel Processing** — Multiple agents tackle subtasks simultaneously
 - **Desktop Notifications** — Get pinged when tasks finish or agents need approval
+- **Asset Packs** — Customize your office with custom sprites, furniture, backgrounds, and fonts — drop a folder and go
 - **Original Soundtrack** — Because every office needs a vibe
 
 ---
@@ -239,7 +241,8 @@ electron/
 └── triggers/         # Trigger engine, webhooks, and scheduling
 
 public/
-└── music/            # Background music tracks
+├── music/            # Background music tracks
+└── assets/           # Bundled asset packs (installed on first launch)
 ```
 
 ---
@@ -413,6 +416,76 @@ Every office needs a vibe. Outworked ships with an original soundtrack featuring
 > _"Don't Ever Turn Me Off"_ · _"She's Just a Coder Agent"_ · _"LLM Love Lying Machine"_ · _"Can Love Be Binary"_ · _"Goodbye Humans"_ · _"How Does Grass Feel"_ · _"Are You Even Reading This"_
 
 Toggle music from the player in the bottom-left corner.
+
+---
+
+## Asset Packs — Customize Your Office
+
+Outworked supports **asset packs** that let you completely reskin the office. Drop a folder into `~/.outworked/assets/` or use the **Import Pack** button in the app, and your office gets a new look.
+
+A single pack can include any combination of:
+
+| Category | What it does |
+|----------|-------------|
+| **Employees** | Replace the procedural pixel characters with custom sprite sheets |
+| **Furniture** | Add custom furniture PNGs alongside or instead of the built-in items |
+| **Background** | Replace the office floor, walls, and windows with a custom image |
+| **Font** | Replace the pixel UI font with your own `.ttf` or `.woff2` |
+
+### Quick Start
+
+The simplest pack is just a folder with a PNG:
+
+```
+~/.outworked/assets/my-pack/
+  default.png           # employee sprite sheet — that's all you need
+```
+
+Or go all out:
+
+```
+~/.outworked/assets/my-pack/
+  manifest.json          # optional — everything auto-detects without it
+  background.png         # replaces the office background
+  myfont.ttf             # replaces the UI font
+  employees/
+    default.png          # sprite sheet used for all agents
+    engineer.png         # role-specific sheet
+    designer.png
+  furniture/
+    desk_wooden.png      # auto-detected as a desk (filename starts with "desk")
+    bookshelf.png
+    plant_big.png
+```
+
+### Employee Sprite Sheets
+
+Each sheet is a horizontal strip of animation frames in a fixed order — **idle, walk, type, think** — with 2 frames per state by default (384x48 total for 48px frames). Multi-row grids are also supported, where each row is a state.
+
+The manifest lets you remap states, customize frame rates, and set per-role sheets. Sheets are auto-assigned to agents by role name, or distributed randomly.
+
+### Furniture
+
+Drop PNG images into a `furniture/` subfolder. Files named `desk*` are auto-detected as desks (agents sit at them when working). All furniture can be added, removed, moved, and rotated from the office via long-press.
+
+### Background
+
+Drop a `background.png` (or `bg.png`) into your pack folder. It replaces the entire office floor, walls, rug, and windows. Supports `cover`, `stretch`, and `tile` display modes.
+
+### Font
+
+Drop a `.ttf`, `.woff`, or `.woff2` file into your pack folder. It replaces the pixel font used throughout the UI. The change takes effect immediately when switching packs.
+
+### Managing Packs
+
+Click the grid icon in the sidebar header to open the **Assets** modal:
+
+- **Packs tab** — Select the active pack, or click **Import Pack from Folder** to copy a pack from anywhere on your machine
+- **Furniture tab** — Add or remove built-in and custom furniture items from the office
+
+A bundled example pack (`outworked-default`) is installed on first launch as a starting point. See `~/.outworked/assets/outworked-default/manifest.json` for a fully documented example manifest.
+
+Full documentation: [`electron/assets/assets.md`](electron/assets/assets.md)
 
 ---
 

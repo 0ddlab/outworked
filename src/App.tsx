@@ -59,6 +59,8 @@ import NotificationCenter, {
   NotificationToast,
 } from "./components/NotificationCenter";
 import OnboardingModal from "./components/OnboardingModal";
+import AssetsModal from "./components/AssetsModal";
+import { getActivePack, listAssetPacks, applyCustomFont } from "./lib/assetPack";
 import { AppNotification, showDesktopNotification } from "./lib/notifications";
 import {
   getSetting,
@@ -159,6 +161,7 @@ export default function App() {
   const [showCostsModal, setShowCostsModal] = useState(false);
   const [showChannelsModal, setShowChannelsModal] = useState(false);
   const [showTriggersModal, setShowTriggersModal] = useState(false);
+  const [showAssetsModal, setShowAssetsModal] = useState(false);
   const [permsEmpty, setPermsEmpty] = useState(false);
   const [permsDismissed, setPermsDismissed] = useState(false);
   const [debugMode, setDebugMode] = useState(false);
@@ -204,6 +207,18 @@ export default function App() {
       setShowOnboarding(!savedOnboarding);
       setFurnitureLayout(savedFurniture);
       await initSoundSettings();
+
+      // Apply custom font from active asset pack
+      try {
+        const activePackId = await getActivePack();
+        if (activePackId) {
+          const packs = await listAssetPacks();
+          const pack = packs.find((p) => p.id === activePackId);
+          if (pack) await applyCustomFont(pack);
+        }
+      } catch {
+        // Font loading is non-critical
+      }
 
       setSkills(await loadSkills());
 
@@ -827,11 +842,25 @@ export default function App() {
         Workspace loaded
       </div>
       <aside className="w-56 shrink-0 border-r border-slate-700 flex flex-col bg-slate-900/95">
-        <div className="px-3 py-3 border-b border-gray-800">
-          <h1 className="text-xs font-pixel text-indigo-300">Outworked</h1>
-          <p className="text-[10px] font-pixel text-slate-400 mt-1">
-            AI Agent HQ
-          </p>
+        <div className="px-3 py-3 border-b border-gray-800 flex items-center justify-between">
+          <div>
+            <h1 className="text-xs font-pixel text-indigo-300">Outworked</h1>
+            <p className="text-[10px] font-pixel text-slate-400 mt-1">
+              AI Agent HQ
+            </p>
+          </div>
+          <button
+            onClick={() => setShowAssetsModal(true)}
+            className="text-slate-500 hover:text-slate-300 transition-colors cursor-pointer"
+            title="Asset Packs"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="3" y="3" width="7" height="7" />
+              <rect x="14" y="3" width="7" height="7" />
+              <rect x="3" y="14" width="7" height="7" />
+              <rect x="14" y="14" width="7" height="7" />
+            </svg>
+          </button>
         </div>
         {/* Update banner */}
         <UpdateBanner />
@@ -1385,6 +1414,10 @@ export default function App() {
             </div>
           </div>
         </div>
+      )}
+
+      {showAssetsModal && (
+        <AssetsModal onClose={() => setShowAssetsModal(false)} />
       )}
 
       {showOnboarding && startupDone && (

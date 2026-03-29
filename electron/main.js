@@ -2174,6 +2174,215 @@ function setupMusicIPC() {
   });
 }
 
+// ─── Asset Packs IPC ─────────────────────────────────────────────
+
+function getAssetsDir() {
+  return path.join(os.homedir(), ".outworked", "assets");
+}
+
+function setupAssetsIPC() {
+  // Ensure ~/.outworked/assets exists
+  const assetsDir = getAssetsDir();
+  fs.mkdirSync(assetsDir, { recursive: true });
+
+  // Install bundled default pack on first launch
+  const defaultPackDest = path.join(assetsDir, "outworked-default");
+  if (!fs.existsSync(defaultPackDest)) {
+    const bundledPack = app.isPackaged
+      ? path.join(process.resourcesPath, "app.asar", "dist-renderer", "assets", "outworked-default")
+      : path.join(__dirname, "..", "public", "assets", "outworked-default");
+    if (fs.existsSync(bundledPack)) {
+      try {
+        fs.cpSync(bundledPack, defaultPackDest, { recursive: true });
+        console.log("[assets] Installed bundled default pack");
+      } catch (err) {
+        console.warn("[assets] Failed to install default pack:", err.message);
+      }
+    }
+  }
+
+  // Register protocol to serve asset files from ~/.outworked/assets
+  protocol.handle("user-assets", (request) => {
+    const url = new URL(request.url);
+    const relParts = [url.hostname, ...url.pathname.split("/")]
+      .filter(Boolean)
+      .map(decodeURIComponent);
+    const filePath = path.join(getAssetsDir(), ...relParts);
+    return net.fetch(`file://${filePath}`);
+  });
+
+  const PNG_RE = /\.png$/i;
+
+  /**
+   * Build a manifest from a directory that has no manifest.json.
+   * Scans for PNGs — if found at top level or in an employees/ subfolder,
+   * auto-generates an employees category with those sheets.
+   * Returns null if no usable PNGs are found.
+   */
+  function inferManifest(packDir, packName) {
+    const sheets = {};
+
+    // Check employees/ subfolder first
+    const empDir = path.join(packDir, "employees");
+    if (fs.existsSync(empDir) && fs.statSync(empDir).isDirectory()) {
+      for (const f of fs.readdirSync(empDir)) {
+        if (PNG_RE.test(f)) {
+          const key = f.replace(/\.png$/i, "").toLowerCase();
+          sheets[key] = `employees/${f}`;
+        }
+      }
+    }
+
+    // Also check top-level PNGs (flat layout: just drop PNGs in the folder)
+    for (const f of fs.readdirSync(packDir)) {
+      if (!PNG_RE.test(f)) continue;
+      const full = path.join(packDir, f);
+      if (!fs.statSync(full).isFile()) continue;
+      const key = f.replace(/\.png$/i, "").toLowerCase();
+      // Don't overwrite if employees/ already provided this key
+      if (!sheets[key]) sheets[key] = f;
+    }
+
+    // Scan furniture/ subfolder
+    const furnitureItems = {};
+    const furDir = path.join(packDir, "furniture");
+    if (fs.existsSync(furDir) && fs.statSync(furDir).isDirectory()) {
+      for (const f of fs.readdirSync(furDir)) {
+        if (PNG_RE.test(f)) {
+          const key = f.replace(/\.png$/i, "").toLowerCase();
+          const isDesk = key === "desk" || key.startsWith("desk_") || key.startsWith("desk-");
+          furnitureItems[key] = { file: `furniture/${f}`, desk: isDesk };
+        }
+      }
+    }
+
+    // Detect background image (background.png at top level or in pack dir)
+    let backgroundFile = null;
+    for (const name of ["background.png", "bg.png"]) {
+      const bgPath = path.join(packDir, name);
+      if (fs.existsSync(bgPath)) {
+        backgroundFile = name;
+        break;
+      }
+    }
+
+    // Detect custom font (.ttf, .woff, .woff2 at top level)
+    const FONT_RE = /\.(ttf|woff2?|otf)$/i;
+    let fontFile = null;
+    for (const f of fs.readdirSync(packDir)) {
+      if (FONT_RE.test(f) && fs.statSync(path.join(packDir, f)).isFile()) {
+        fontFile = f;
+        break;
+      }
+    }
+
+    const hasSheets = Object.keys(sheets).length > 0;
+    const hasFurniture = Object.keys(furnitureItems).length > 0;
+    if (!hasSheets && !hasFurniture && !backgroundFile && !fontFile) return null;
+
+    // If no "default" sheet, pick the first one as default
+    if (hasSheets && !sheets["default"]) {
+      const first = Object.keys(sheets)[0];
+      sheets["default"] = sheets[first];
+    }
+
+    const categories = {};
+    if (hasSheets) categories.employees = { sheets };
+    if (hasFurniture) categories.furniture = { items: furnitureItems };
+    if (backgroundFile) categories.background = { file: backgroundFile };
+    if (fontFile) categories.font = { file: fontFile };
+
+    return {
+      name: packName,
+      categories,
+    };
+  }
+
+  // Scan ~/.outworked/assets/ for packs (with or without manifest.json)
+  ipcMain.handle("assets:listPacks", () => {
+    const dir = getAssetsDir();
+    if (!fs.existsSync(dir)) return [];
+    const results = [];
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const packDir = path.join(dir, entry.name);
+      const manifestPath = path.join(packDir, "manifest.json");
+
+      let manifest = null;
+      if (fs.existsSync(manifestPath)) {
+        try {
+          const raw = fs.readFileSync(manifestPath, "utf-8");
+          manifest = JSON.parse(raw);
+          if (!manifest.name || !manifest.categories) manifest = null;
+        } catch {
+          // invalid JSON — fall through to auto-detection
+        }
+      }
+
+      // No valid manifest — try to infer one from PNGs
+      if (!manifest) {
+        manifest = inferManifest(packDir, entry.name);
+      }
+
+      if (manifest) {
+        results.push({ id: entry.name, manifest });
+      }
+    }
+    return results;
+  });
+
+  // Active pack stored in app_settings via db
+  ipcMain.handle("assets:getActivePack", () => {
+    return db.settingGet("activeAssetPack") ?? null;
+  });
+
+  // Import a pack from a user-selected folder
+  ipcMain.handle("assets:importPack", async () => {
+    const result = await dialog.showOpenDialog(mainWindow, {
+      properties: ["openDirectory"],
+      title: "Select an asset pack folder",
+    });
+    if (result.canceled || result.filePaths.length === 0) return null;
+
+    const srcDir = result.filePaths[0];
+    const folderName = path.basename(srcDir);
+    const destDir = path.join(getAssetsDir(), folderName);
+
+    // Don't overwrite existing packs silently — append a number if needed
+    let finalDest = destDir;
+    let counter = 1;
+    while (fs.existsSync(finalDest)) {
+      finalDest = `${destDir}-${counter++}`;
+    }
+
+    try {
+      fs.cpSync(srcDir, finalDest, { recursive: true });
+      return path.basename(finalDest);
+    } catch (err) {
+      console.error("[assets] Import failed:", err.message);
+      return null;
+    }
+  });
+
+  ipcMain.handle("assets:setActivePack", (_event, packId) => {
+    if (packId === null || packId === undefined) {
+      db.settingDelete("activeAssetPack");
+    } else {
+      db.settingSet("activeAssetPack", packId);
+    }
+  });
+
+  ipcMain.handle("assets:openFolder", () => {
+    shell.openPath(getAssetsDir());
+  });
+
+  ipcMain.handle("assets:getReadme", () => {
+    const mdPath = path.join(__dirname, "assets", "assets.md");
+    if (!fs.existsSync(mdPath)) return "";
+    return fs.readFileSync(mdPath, "utf-8");
+  });
+}
+
 // ─── Session persistence ──────────────────────────────────────────
 const SESSIONS_DIR = path.join(os.homedir(), ".outworked", "sessions");
 
@@ -2462,10 +2671,10 @@ function createWindow() {
         "Content-Security-Policy": [
           "default-src 'self' file:; " +
             "script-src 'self' blob:; " +
-            "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; " +
-            "font-src 'self' https://fonts.gstatic.com; " +
-            "connect-src 'self' https://api.openai.com https://api.anthropic.com; " +
-            "img-src 'self' data: blob:; " +
+            "style-src 'self' 'unsafe-inline'; " +
+            "font-src 'self' user-assets:; " +
+            "connect-src 'self' https://api.openai.com https://api.anthropic.com user-assets:; " +
+            "img-src 'self' data: blob: user-assets:; " +
             "media-src 'self' user-music:; " +
             "worker-src 'self' blob:;",
         ],
@@ -2552,6 +2761,7 @@ function setupNotificationIPC() {
 // Allow user-music:// to stream audio and be fetched from the renderer
 protocol.registerSchemesAsPrivileged([
   { scheme: "user-music", privileges: { stream: true, supportFetchAPI: true } },
+  { scheme: "user-assets", privileges: { supportFetchAPI: true } },
 ]);
 
 app.whenReady().then(() => {
@@ -2607,6 +2817,7 @@ app.whenReady().then(() => {
   setupGitIPC();
   setupPermissionsIPC();
   setupMusicIPC();
+  setupAssetsIPC();
   setupSessionIPC();
   setupDatabaseIPC();
   setupNotificationIPC();
