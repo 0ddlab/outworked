@@ -297,6 +297,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   music: {
     listTracks: () => ipcRenderer.invoke("music:listTracks"),
     getReadme: () => ipcRenderer.invoke("music:getReadme"),
+    openFolder: () => ipcRenderer.invoke("music:openFolder"),
   },
 
   // Asset packs

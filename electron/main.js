@@ -17,6 +17,7 @@ const os = require("os");
 const { spawn, execSync, execFileSync } = require("child_process");
 const crypto = require("crypto");
 const { autoUpdater } = require("electron-updater");
+const extractZip = require("extract-zip");
 const sdkBridge = require("./sdk-bridge");
 
 // Set the app name early so macOS notifications show "Outworked" instead of "Electron"
@@ -247,13 +248,20 @@ const shells = new Map(); // id → { proc, cwd }
 function killShellTree(proc) {
   if (!proc || proc.killed) return;
   const pid = proc.pid;
-  if (!pid) { proc.kill(); return; }
+  if (!pid) {
+    proc.kill();
+    return;
+  }
   try {
     // Kill the entire process group — on Unix, passing -pid kills all children
     process.kill(-pid, "SIGTERM");
   } catch {
     // Fallback: kill just the shell process (e.g. if not a process group leader)
-    try { proc.kill("SIGTERM"); } catch { /* already dead */ }
+    try {
+      proc.kill("SIGTERM");
+    } catch {
+      /* already dead */
+    }
   }
 }
 
@@ -272,7 +280,10 @@ let caffeinateType = null; // "prevent-app-suspension" | "prevent-display-sleep"
 function caffeineStart(type) {
   if (caffeinateBlockerId !== null) {
     // Already blocking — upgrade to stronger type if needed
-    if (type === "prevent-display-sleep" && caffeinateType !== "prevent-display-sleep") {
+    if (
+      type === "prevent-display-sleep" &&
+      caffeinateType !== "prevent-display-sleep"
+    ) {
       caffeineStop();
     } else {
       return;
@@ -328,9 +339,7 @@ function _hasEnabledScheduledTasks() {
 function _hasConnectedChannels() {
   try {
     const channelManager = require("./channels/channel-manager");
-    return channelManager
-      .getChannels()
-      .some((ch) => ch.status === "connected");
+    return channelManager.getChannels().some((ch) => ch.status === "connected");
   } catch {
     return false;
   }
@@ -644,7 +653,9 @@ function setupShellIPC() {
         if (result && mainWindow && !mainWindow.isDestroyed()) {
           mainWindow.webContents.send("claude-code:event", id, {
             type: "result",
-            subtype: result.subtype || (code === 0 ? "success" : "error_during_execution"),
+            subtype:
+              result.subtype ||
+              (code === 0 ? "success" : "error_during_execution"),
             result: result.text || "",
             session_id: result.sessionId,
             total_cost_usd: result.cost,
@@ -1050,7 +1061,9 @@ app.on("before-quit", () => {
   sdkBridge.abortAll();
   try {
     require("./skills/skill-runtime-manager").destroyAll();
-  } catch { /* best effort */ }
+  } catch {
+    /* best effort */
+  }
   try {
     require("./mcp/mcp-server").stopAllTunnels();
   } catch {
@@ -2112,13 +2125,11 @@ function setupMusicIPC() {
 
   // Register protocol to serve user tracks from ~/.outworked/music
   protocol.handle("user-music", (request) => {
-    const url = new URL(request.url);
-    // hostname + pathname covers paths like user-music://subdir/file.mp3
-    const relParts = [url.hostname, ...url.pathname.split("/")]
-      .filter(Boolean)
-      .map(decodeURIComponent);
+    // Parse raw URL to avoid hostname lowercasing / space issues
+    const raw = request.url.replace(/^user-music:\/\//, "");
+    const relParts = raw.split("/").filter(Boolean).map(decodeURIComponent);
     const filePath = path.join(getUserMusicDir(), ...relParts);
-    return net.fetch(`file://${filePath}`);
+    return net.fetch(require("url").pathToFileURL(filePath).href);
   });
 
   const AUDIO_RE = /\.(mp3|wav|ogg|m4a|flac)$/i;
@@ -2172,6 +2183,12 @@ function setupMusicIPC() {
     if (!fs.existsSync(mdPath)) return "";
     return fs.readFileSync(mdPath, "utf-8");
   });
+
+  ipcMain.handle("music:openFolder", () => {
+    const dir = getUserMusicDir();
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    shell.openPath(dir);
+  });
 }
 
 // ─── Asset Packs IPC ─────────────────────────────────────────────
@@ -2189,7 +2206,13 @@ function setupAssetsIPC() {
   const defaultPackDest = path.join(assetsDir, "outworked-default");
   if (!fs.existsSync(defaultPackDest)) {
     const bundledPack = app.isPackaged
-      ? path.join(process.resourcesPath, "app.asar", "dist-renderer", "assets", "outworked-default")
+      ? path.join(
+          process.resourcesPath,
+          "app.asar",
+          "dist-renderer",
+          "assets",
+          "outworked-default",
+        )
       : path.join(__dirname, "..", "public", "assets", "outworked-default");
     if (fs.existsSync(bundledPack)) {
       try {
@@ -2203,12 +2226,11 @@ function setupAssetsIPC() {
 
   // Register protocol to serve asset files from ~/.outworked/assets
   protocol.handle("user-assets", (request) => {
-    const url = new URL(request.url);
-    const relParts = [url.hostname, ...url.pathname.split("/")]
-      .filter(Boolean)
-      .map(decodeURIComponent);
+    // Parse raw URL to avoid hostname lowercasing / space issues
+    const raw = request.url.replace(/^user-assets:\/\//, "");
+    const relParts = raw.split("/").filter(Boolean).map(decodeURIComponent);
     const filePath = path.join(getAssetsDir(), ...relParts);
-    return net.fetch(`file://${filePath}`);
+    return net.fetch(require("url").pathToFileURL(filePath).href);
   });
 
   const PNG_RE = /\.png$/i;
@@ -2250,7 +2272,10 @@ function setupAssetsIPC() {
       for (const f of fs.readdirSync(furDir)) {
         if (PNG_RE.test(f)) {
           const key = f.replace(/\.png$/i, "").toLowerCase();
-          const isDesk = key === "desk" || key.startsWith("desk_") || key.startsWith("desk-");
+          const isDesk =
+            key === "desk" ||
+            key.startsWith("desk_") ||
+            key.startsWith("desk-");
           furnitureItems[key] = { file: `furniture/${f}`, desk: isDesk };
         }
       }
@@ -2278,7 +2303,8 @@ function setupAssetsIPC() {
 
     const hasSheets = Object.keys(sheets).length > 0;
     const hasFurniture = Object.keys(furnitureItems).length > 0;
-    if (!hasSheets && !hasFurniture && !backgroundFile && !fontFile) return null;
+    if (!hasSheets && !hasFurniture && !backgroundFile && !fontFile)
+      return null;
 
     // If no "default" sheet, pick the first one as default
     if (hasSheets && !sheets["default"]) {
@@ -2363,9 +2389,15 @@ function setupAssetsIPC() {
 
     try {
       if (isZip) {
-        const extractZip = require("extract-zip");
         fs.mkdirSync(finalDest, { recursive: true });
         await extractZip(srcPath, { dir: finalDest });
+
+        // Remove macOS metadata folders that sneak into zips
+        const macOSDir = path.join(finalDest, "__MACOSX");
+        if (fs.existsSync(macOSDir)) {
+          fs.rmSync(macOSDir, { recursive: true });
+        }
+
         // If the zip contains a single top-level folder, unwrap it
         const entries = fs.readdirSync(finalDest);
         if (
@@ -2863,9 +2895,12 @@ app.whenReady().then(() => {
   // ─── Skill runtimes + MCP Server ────────────────────────────────
   const skillManager = require("./skills/skill-runtime-manager");
   const mcpServer = require("./mcp/mcp-server");
-  skillManager.discoverAndRegister()
+  skillManager
+    .discoverAndRegister()
     .then(() => skillManager.setupSkillRuntimeIPC(ipcMain, mainWindow))
-    .catch((err) => console.error("[skill-runtimes] Failed to initialize:", err.message));
+    .catch((err) =>
+      console.error("[skill-runtimes] Failed to initialize:", err.message),
+    );
   mcpServer.setSkillManager(skillManager);
   mcpServer.start();
 
@@ -2906,22 +2941,31 @@ app.whenReady().then(() => {
       const fs = require("fs");
       const path = require("path");
       try {
-        return fs.readFileSync(path.join(__dirname, "triggers", "triggers.md"), "utf-8");
-      } catch { return null; }
+        return fs.readFileSync(
+          path.join(__dirname, "triggers", "triggers.md"),
+          "utf-8",
+        );
+      } catch {
+        return null;
+      }
     });
 
     // Scheduled tasks for the triggers UI
     ipcMain.handle("scheduler:list", () => {
       try {
         return db.schedulerList();
-      } catch { return []; }
+      } catch {
+        return [];
+      }
     });
     ipcMain.handle("scheduler:delete", (_event, id) => {
       try {
         db.schedulerDelete(id);
         syncCaffeinate();
         return { ok: true };
-      } catch { return { ok: false }; }
+      } catch {
+        return { ok: false };
+      }
     });
 
     const webhookServer = new WebhookServer();
