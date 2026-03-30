@@ -2339,13 +2339,19 @@ function setupAssetsIPC() {
   // Import a pack from a user-selected folder
   ipcMain.handle("assets:importPack", async () => {
     const result = await dialog.showOpenDialog(mainWindow, {
-      properties: ["openDirectory"],
-      title: "Select an asset pack folder",
+      properties: ["openFile", "openDirectory"],
+      title: "Select an asset pack folder or zip file",
+      filters: [
+        { name: "Zip Archives", extensions: ["zip"] },
+        { name: "All Files", extensions: ["*"] },
+      ],
     });
     if (result.canceled || result.filePaths.length === 0) return null;
 
-    const srcDir = result.filePaths[0];
-    const folderName = path.basename(srcDir);
+    const srcPath = result.filePaths[0];
+    const isZip = srcPath.toLowerCase().endsWith(".zip");
+
+    const folderName = path.basename(srcPath, isZip ? ".zip" : "");
     const destDir = path.join(getAssetsDir(), folderName);
 
     // Don't overwrite existing packs silently — append a number if needed
@@ -2356,7 +2362,28 @@ function setupAssetsIPC() {
     }
 
     try {
-      fs.cpSync(srcDir, finalDest, { recursive: true });
+      if (isZip) {
+        const extractZip = require("extract-zip");
+        fs.mkdirSync(finalDest, { recursive: true });
+        await extractZip(srcPath, { dir: finalDest });
+        // If the zip contains a single top-level folder, unwrap it
+        const entries = fs.readdirSync(finalDest);
+        if (
+          entries.length === 1 &&
+          fs.statSync(path.join(finalDest, entries[0])).isDirectory()
+        ) {
+          const innerDir = path.join(finalDest, entries[0]);
+          for (const item of fs.readdirSync(innerDir)) {
+            fs.renameSync(
+              path.join(innerDir, item),
+              path.join(finalDest, item),
+            );
+          }
+          fs.rmdirSync(innerDir);
+        }
+      } else {
+        fs.cpSync(srcPath, finalDest, { recursive: true });
+      }
       return path.basename(finalDest);
     } catch (err) {
       console.error("[assets] Import failed:", err.message);

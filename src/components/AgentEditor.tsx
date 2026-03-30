@@ -331,9 +331,11 @@ export default function AgentEditor({
               <p className="text-[9px] text-slate-500 mb-1">Sprite</p>
               <div className="flex gap-1.5 flex-wrap">
                 <button
-                  onClick={() =>
-                    setDraft((prev) => ({ ...prev, spriteSheet: undefined }))
-                  }
+                  onClick={() => {
+                    const next = { ...draft, spriteSheet: undefined };
+                    setDraft(next);
+                    onSave(next);
+                  }}
                   className={`px-2 py-1 rounded text-[10px] border transition-all cursor-pointer ${
                     !draft.spriteSheet
                       ? "border-indigo-500 bg-indigo-900/40 text-indigo-200"
@@ -345,9 +347,11 @@ export default function AgentEditor({
                 {sheetKeys.map((key) => (
                   <button
                     key={key}
-                    onClick={() =>
-                      setDraft((prev) => ({ ...prev, spriteSheet: key }))
-                    }
+                    onClick={() => {
+                      const next = { ...draft, spriteSheet: key };
+                      setDraft(next);
+                      onSave(next);
+                    }}
                     className={`px-2 py-1 rounded text-[10px] border transition-all cursor-pointer ${
                       draft.spriteSheet === key
                         ? "border-indigo-500 bg-indigo-900/40 text-indigo-200"
@@ -678,6 +682,7 @@ export default function AgentEditor({
                 await deleteClaudeAgentFile(draft.subagentFile);
               }
             }
+            onClose();
           }}
           className="btn-pixel bg-indigo-600 hover:bg-indigo-500 flex-1"
         >
@@ -721,11 +726,8 @@ export default function AgentEditor({
           onUpdate={(skills) => setDraft((prev) => ({ ...prev, skills }))}
           onClose={() => {
             setShowSkillsModal(false);
-            // Save the agent with the latest draft (use functional form to get latest state)
-            setDraft((current) => {
-              onSave(current);
-              return current;
-            });
+            // Save the agent with the latest draft
+            onSave(draft);
           }}
         />
       )}
@@ -747,10 +749,7 @@ export default function AgentEditor({
           }
           onClose={() => {
             setShowMcpModal(false);
-            setDraft((current) => {
-              onSave(current);
-              return current;
-            });
+            onSave(draft);
           }}
         />
       )}

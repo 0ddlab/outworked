@@ -61,7 +61,8 @@ export interface FurnitureItem {
   y: number; // tile y
   rotation?: number; // 0, 90, 180, 270
   custom?: boolean; // true = from asset pack
-  customKey?: string; // key into pack furniture items
+  customKey?: string; // key into pack furniture items (may be "packId:key" or legacy bare key)
+  packId?: string; // asset pack this item came from (absent on legacy items)
   isDesk?: boolean; // true = agents work here (for custom furniture)
   removed?: boolean; // tombstone: default item was deleted by user
 }
@@ -101,6 +102,10 @@ export class OfficeScene extends Phaser.Scene {
   private collaborationLines: Map<string, Phaser.GameObjects.Graphics> =
     new Map();
   private resizeTimer?: ReturnType<typeof setTimeout>;
+  /** True while rebuildAll is executing — guards against concurrent persistence. */
+  private rebuilding = false;
+  /** True while WebGL context is lost — skip all draw operations. */
+  private contextLost = false;
 
   // ── Drag-and-drop ──
   private isDragging = false;
@@ -162,53 +167,73 @@ export class OfficeScene extends Phaser.Scene {
     // All graphics are procedurally generated — no external assets needed
   }
 
-  /** Load the active asset pack (if any) and pre-fetch its sprite sheets. */
+  /** Load the active asset pack (if any) and pre-fetch its sprite sheets.
+   *  Furniture is loaded from ALL installed packs so items can be mixed. */
   async loadAssetPack(): Promise<void> {
     try {
       const activeId = await getActivePack();
+      const packs = await listAssetPacks();
+
+      // ── Active pack: employees + background ──
       if (!activeId) {
         this.activePack = null;
         this.cachedSheets.clear();
-        return;
-      }
-      const packs = await listAssetPacks();
-      const pack = packs.find((p) => p.id === activeId) ?? null;
-      if (!pack?.manifest.categories.employees) {
-        this.activePack = null;
-        this.cachedSheets.clear();
-        return;
-      }
-      this.activePack = pack;
-      // Pre-fetch all employee sheets
-      const sheets = pack.manifest.categories.employees.sheets;
-      const entries = Object.entries(sheets);
-      const loaded = await Promise.all(
-        entries.map(async ([role, relPath]) => {
-          const url = `user-assets://${pack.id}/${relPath}`;
-          try {
-            const canvas = await loadSpriteSheetImage(url);
-            return [role, canvas] as const;
-          } catch {
-            console.warn(`[assets] Failed to load sheet: ${url}`);
-            return null;
+        this.cachedBackground = null;
+      } else {
+        const pack = packs.find((p) => p.id === activeId) ?? null;
+        if (!pack?.manifest.categories.employees) {
+          this.activePack = null;
+          this.cachedSheets.clear();
+          this.cachedBackground = null;
+        } else {
+          this.activePack = pack;
+          // Pre-fetch all employee sheets
+          const sheets = pack.manifest.categories.employees.sheets;
+          const entries = Object.entries(sheets);
+          const loaded = await Promise.all(
+            entries.map(async ([role, relPath]) => {
+              const url = `user-assets://${pack.id}/${relPath}`;
+              try {
+                const canvas = await loadSpriteSheetImage(url);
+                return [role, canvas] as const;
+              } catch {
+                console.warn(`[assets] Failed to load sheet: ${url}`);
+                return null;
+              }
+            }),
+          );
+          this.cachedSheets.clear();
+          for (const entry of loaded) {
+            if (entry) this.cachedSheets.set(entry[0], entry[1]);
           }
-        }),
-      );
-      this.cachedSheets.clear();
-      for (const entry of loaded) {
-        if (entry) this.cachedSheets.set(entry[0], entry[1]);
+
+          // Pre-fetch background image
+          this.cachedBackground = null;
+          const bgCat = pack.manifest.categories.background;
+          if (bgCat) {
+            const bgConfig = typeof bgCat === "string" ? { file: bgCat } : bgCat;
+            this.backgroundMode = bgConfig.mode ?? "cover";
+            const bgUrl = `user-assets://${pack.id}/${bgConfig.file}`;
+            try {
+              this.cachedBackground = await loadSpriteSheetImage(bgUrl);
+            } catch {
+              console.warn(`[assets] Failed to load background: ${bgUrl}`);
+            }
+          }
+        }
       }
 
-      // Pre-fetch furniture images
+      // ── Furniture: load from ALL packs ──
       this.cachedFurniture.clear();
       this.furnitureConfigs.clear();
-      const furnitureCat = pack.manifest.categories.furniture;
-      if (furnitureCat) {
+      for (const p of packs) {
+        const furnitureCat = p.manifest.categories.furniture;
+        if (!furnitureCat) continue;
         const furEntries = Object.entries(furnitureCat.items);
         const furLoaded = await Promise.all(
           furEntries.map(async ([key, entry]) => {
             const config = normalizeFurnitureItem(key, entry);
-            const url = furnitureItemUrl(pack.id, config);
+            const url = furnitureItemUrl(p.id, config);
             try {
               const canvas = await loadSpriteSheetImage(url);
               return [key, canvas, config] as const;
@@ -220,22 +245,34 @@ export class OfficeScene extends Phaser.Scene {
         );
         for (const entry of furLoaded) {
           if (entry) {
-            this.cachedFurniture.set(entry[0], entry[1]);
-            this.furnitureConfigs.set(entry[0], entry[2]);
+            const nsKey = `${p.id}:${entry[0]}`;
+            this.cachedFurniture.set(nsKey, entry[1]);
+            this.furnitureConfigs.set(nsKey, entry[2]);
+            // Also register under the bare key for backward compat with
+            // saved layouts that pre-date the packId:key format.
+            // Last-write-wins — the active pack takes priority (loaded last below).
+            if (p.id !== activeId) {
+              if (!this.cachedFurniture.has(entry[0])) {
+                this.cachedFurniture.set(entry[0], entry[1]);
+                this.furnitureConfigs.set(entry[0], entry[2]);
+              }
+            }
           }
         }
       }
-      // Pre-fetch background image
-      this.cachedBackground = null;
-      const bgCat = pack.manifest.categories.background;
-      if (bgCat) {
-        const bgConfig = typeof bgCat === "string" ? { file: bgCat } : bgCat;
-        this.backgroundMode = bgConfig.mode ?? "cover";
-        const bgUrl = `user-assets://${pack.id}/${bgConfig.file}`;
-        try {
-          this.cachedBackground = await loadSpriteSheetImage(bgUrl);
-        } catch {
-          console.warn(`[assets] Failed to load background: ${bgUrl}`);
+      // Active pack bare keys win over other packs for backward compat
+      if (activeId) {
+        const activeFurn = packs.find((p) => p.id === activeId)?.manifest.categories.furniture;
+        if (activeFurn) {
+          for (const [key] of Object.entries(activeFurn.items)) {
+            const nsKey = `${activeId}:${key}`;
+            const canvas = this.cachedFurniture.get(nsKey);
+            const config = this.furnitureConfigs.get(nsKey);
+            if (canvas) {
+              this.cachedFurniture.set(key, canvas);
+              if (config) this.furnitureConfigs.set(key, config);
+            }
+          }
         }
       }
     } catch (err) {
@@ -256,33 +293,34 @@ export class OfficeScene extends Phaser.Scene {
     this.ready = true;
 
     // Load asset pack in the background — re-render agents and restore
-    // custom furniture once pack images are cached.
+    // custom furniture once pack images are cached (furniture from ALL packs).
     this.loadAssetPack().then(() => {
-      if (this.activePack) {
-        // Restore custom pack furniture that couldn't load earlier (cache was empty)
-        if (this.savedLayout && this.cachedFurniture.size > 0) {
-          for (const item of this.savedLayout) {
-            if (
-              item.custom &&
-              item.customKey &&
-              this.cachedFurniture.has(item.customKey) &&
-              !this.furnitureContainers.has(item.id)
-            ) {
-              const config = this.furnitureConfigs.get(item.customKey);
-              this.createFurnitureContainer(item.id, item.type, item.x, item.y, {
-                custom: true,
-                customKey: item.customKey,
-                isDesk: item.isDesk ?? config?.desk ?? false,
-                rotation: item.rotation,
-              });
-            }
-          }
+      // If a rebuild is in progress, skip — rebuildAll will handle everything.
+      if (this.rebuilding) return;
+      // Restore custom pack furniture that couldn't load earlier (cache was empty)
+      if (this.savedLayout && this.cachedFurniture.size > 0) {
+        let added = false;
+        for (const item of this.savedLayout) {
+          if (!item.custom || !item.customKey || this.furnitureContainers.has(item.id)) continue;
+          const resolvedKey = this.resolveFurnitureKey(item.customKey, item.packId);
+          if (!resolvedKey) continue;
+          const config = this.furnitureConfigs.get(resolvedKey);
+          this.createFurnitureContainer(item.id, item.type, item.x, item.y, {
+            custom: true,
+            customKey: resolvedKey,
+            packId: item.packId ?? this.packIdFromKey(resolvedKey),
+            isDesk: item.isDesk ?? config?.desk ?? false,
+            rotation: item.rotation,
+          });
+          added = true;
+        }
+        if (added) {
           this.rebuildDeskPositions();
           this.persistFurniture();
         }
-        if (this.agentSprites.size > 0) {
-          this.fullRebuildAgents();
-        }
+      }
+      if (this.activePack && this.agentSprites.size > 0) {
+        this.fullRebuildAgents();
       }
     });
 
@@ -437,9 +475,26 @@ export class OfficeScene extends Phaser.Scene {
     this.scale.on("resize", () => {
       if (this.resizeTimer) clearTimeout(this.resizeTimer);
       this.resizeTimer = setTimeout(() => {
-        if (!this.scene.isActive() || !this.sys.game) return;
+        if (!this.scene.isActive() || !this.sys.game || this.contextLost) return;
+        // Skip rebuild if canvas is too small — will retry on next resize
+        const w = this.scale.gameSize.width;
+        const h = this.scale.gameSize.height;
+        if (w < 100 || h < 100) return;
         this.rebuildAll();
       }, 150);
+    });
+
+    // Recover from WebGL context loss (e.g. canvas temporarily resized to 0)
+    const canvas = this.sys.game.canvas;
+    canvas.addEventListener("webglcontextlost", (e) => {
+      e.preventDefault(); // allow context to be restored
+      this.contextLost = true;
+    });
+    canvas.addEventListener("webglcontextrestored", () => {
+      this.contextLost = false;
+      if (this.scene.isActive() && this.sys.game) {
+        this.rebuildAll();
+      }
     });
 
     // Render any agents that were set before create() fired
@@ -485,43 +540,95 @@ export class OfficeScene extends Phaser.Scene {
 
   /** Tear down all scene visuals and rebuild from scratch (used on resize) */
   private rebuildAll() {
-    // ── Destroy everything ──
-    // Background graphics (lights, dead zone, etc.)
-    for (const obj of this.bgObjects) obj.destroy();
-    this.bgObjects = [];
-    // Main office floor/walls
-    if (this.officeGraphics) {
-      this.officeGraphics.destroy();
-      this.officeGraphics = undefined;
-    }
-    // Furniture
-    this.furnitureContainers.forEach((c) => c.destroy());
-    this.furnitureContainers.clear();
-    // Dust particles
-    if (this.dustGraphics) {
-      this.dustGraphics.destroy();
-      this.dustGraphics = undefined;
-    }
-    // Grid overlay (in case resize happened during drag)
-    this.hideGridOverlay();
-    if (this.dragShadow) {
-      this.dragShadow.destroy();
-      this.dragShadow = undefined;
-    }
-    this.isDragging = false;
-    this.dragTarget = null;
+    // Don't attempt to draw while the WebGL context is lost
+    if (this.contextLost) return;
 
-    // ── Rebuild ──
-    this.computeGrid();
-    // Snapshot current furniture positions so they survive the rebuild
-    if (this.furnitureItems.length > 0) {
-      this.savedLayout = [...this.furnitureItems];
-    }
-    this.drawOffice();
-    this.createAllFurniture();
-    this.initDustParticles();
-    if (this.agents.length > 0) {
-      this.fullRebuildAgents();
+    this.rebuilding = true;
+    try {
+      // Dismiss any active furniture edit overlay
+      this.dismissFurnitureEdit();
+
+      // ── Destroy everything ──
+      // Background graphics (lights, dead zone, etc.)
+      for (const obj of this.bgObjects) {
+        try { obj.destroy(); } catch { /* already destroyed */ }
+      }
+      this.bgObjects = [];
+      // Main office floor/walls
+      if (this.officeGraphics) {
+        this.officeGraphics.destroy();
+        this.officeGraphics = undefined;
+      }
+      // Furniture
+      this.furnitureContainers.forEach((c) => {
+        try { c.destroy(); } catch { /* already destroyed */ }
+      });
+      this.furnitureContainers.clear();
+      // Dust particles
+      if (this.dustGraphics) {
+        this.dustGraphics.destroy();
+        this.dustGraphics = undefined;
+      }
+      // Grid overlay (in case resize happened during drag)
+      this.hideGridOverlay();
+      if (this.dragShadow) {
+        this.dragShadow.destroy();
+        this.dragShadow = undefined;
+      }
+      this.isDragging = false;
+      this.dragTarget = null;
+
+      // ── Rebuild ──
+      this.computeGrid();
+      // Merge current furniture positions into savedLayout so that
+      // user-moved items keep their positions, while tombstones and
+      // not-yet-rendered custom items from the original layout survive.
+      if (this.furnitureItems.length > 0) {
+        const currentById = new Map(this.furnitureItems.map((f) => [f.id, f]));
+        if (this.savedLayout) {
+          // Update positions for items that exist in the current scene
+          this.savedLayout = this.savedLayout.map((saved) => {
+            const current = currentById.get(saved.id);
+            return current ?? saved; // keep tombstones & unrendered items as-is
+          });
+          // Add any items that are in furnitureItems but not in savedLayout
+          // (e.g. user-added items since last load)
+          const savedIds = new Set(this.savedLayout.map((f) => f.id));
+          for (const item of this.furnitureItems) {
+            if (!savedIds.has(item.id)) {
+              this.savedLayout.push(item);
+            }
+          }
+        } else {
+          this.savedLayout = [...this.furnitureItems];
+        }
+      }
+      this.drawOffice();
+      this.createAllFurniture();
+      this.initDustParticles();
+      if (this.agents.length > 0) {
+        this.fullRebuildAgents();
+      }
+    } catch (err) {
+      console.error("[OfficeScene] rebuildAll failed, retrying:", err);
+      // Schedule a recovery rebuild
+      setTimeout(() => {
+        if (this.scene.isActive() && this.sys.game && !this.contextLost) {
+          try {
+            this.computeGrid();
+            this.drawOffice();
+            this.createAllFurniture();
+            this.initDustParticles();
+            if (this.agents.length > 0) {
+              this.fullRebuildAgents();
+            }
+          } catch (retryErr) {
+            console.error("[OfficeScene] recovery rebuild also failed:", retryErr);
+          }
+        }
+      }, 500);
+    } finally {
+      this.rebuilding = false;
     }
   }
 
@@ -553,18 +660,23 @@ export class OfficeScene extends Phaser.Scene {
     { type: "fan", label: "Fan" },
   ];
 
-  /** Add furniture to the office — works for both builtin types and custom pack items. */
+  /** Add furniture to the office — works for both builtin types and custom pack items.
+   *  For pack items, `key` may be "packId:itemKey" (namespaced) or a bare key. */
   addFurniture(key: string) {
     const id = `added-${key}-${Date.now()}`;
     const tileX = Math.floor(this.cols / 2);
     const tileY = Math.floor(this.rows / 2);
 
-    // Check if it's a custom pack item
+    // Check if it's a custom pack item (try namespaced key first, then bare)
     if (this.cachedFurniture.has(key)) {
       const config = this.furnitureConfigs.get(key);
+      // Extract packId from namespaced key ("packId:itemKey")
+      const colonIdx = key.indexOf(":");
+      const packId = colonIdx >= 0 ? key.slice(0, colonIdx) : undefined;
       this.createFurnitureContainer(id, key, tileX, tileY, {
         custom: true,
         customKey: key,
+        packId,
         isDesk: config?.desk ?? false,
       });
     } else {
@@ -778,54 +890,63 @@ export class OfficeScene extends Phaser.Scene {
     const W = this.scale.gameSize.width;
     const H = this.scale.gameSize.height;
 
-    // Custom background from asset pack
+    // Custom background from asset pack — fall back to procedural on failure
     if (this.cachedBackground) {
-      const texKey = "_custom_bg";
-      if (this.textures.exists(texKey)) this.textures.remove(texKey);
-      this.textures.addImage(
-        texKey,
-        this.cachedBackground as unknown as HTMLImageElement,
-      );
-      const officeW = cols * TILE;
-      const officeH = rows * TILE;
+      try {
+        const bgCanvas = this.cachedBackground;
+        if (!bgCanvas.width || !bgCanvas.height) throw new Error("empty background image");
+        const texKey = "_custom_bg";
+        if (this.textures.exists(texKey)) this.textures.remove(texKey);
+        this.textures.addImage(
+          texKey,
+          bgCanvas as unknown as HTMLImageElement,
+        );
+        const officeW = cols * TILE;
+        const officeH = rows * TILE;
 
-      if (this.backgroundMode === "tile") {
-        // Tile the image across the office area
-        const imgW = this.cachedBackground.width;
-        const imgH = this.cachedBackground.height;
-        for (let y = 0; y < officeH; y += imgH) {
-          for (let x = 0; x < officeW; x += imgW) {
-            const s = this.add.sprite(x, y, texKey);
-            s.setOrigin(0, 0);
-            s.setDepth(0);
-            this.bgObjects.push(s);
+        if (this.backgroundMode === "tile") {
+          // Tile the image across the office area
+          const imgW = bgCanvas.width;
+          const imgH = bgCanvas.height;
+          for (let y = 0; y < officeH; y += imgH) {
+            for (let x = 0; x < officeW; x += imgW) {
+              const s = this.add.sprite(x, y, texKey);
+              s.setOrigin(0, 0);
+              s.setDepth(0);
+              this.bgObjects.push(s);
+            }
           }
-        }
-      } else {
-        // "cover" (default) or "stretch" — scale to fill the office
-        const bg = this.add.sprite(0, 0, texKey);
-        bg.setOrigin(0, 0);
-        bg.setDepth(0);
-        if (this.backgroundMode === "stretch") {
-          bg.setDisplaySize(officeW, officeH);
         } else {
-          // Cover: scale to fill while maintaining aspect ratio
-          const scaleX = officeW / this.cachedBackground.width;
-          const scaleY = officeH / this.cachedBackground.height;
-          const scale = Math.max(scaleX, scaleY);
-          bg.setScale(scale);
+          // "cover" (default) or "stretch" — scale to fill the office
+          const bg = this.add.sprite(0, 0, texKey);
+          bg.setOrigin(0, 0);
+          bg.setDepth(0);
+          if (this.backgroundMode === "stretch") {
+            bg.setDisplaySize(officeW, officeH);
+          } else {
+            // Cover: scale to fill while maintaining aspect ratio
+            const scaleX = officeW / bgCanvas.width;
+            const scaleY = officeH / bgCanvas.height;
+            const scale = Math.max(scaleX, scaleY);
+            bg.setScale(scale);
+          }
+          this.bgObjects.push(bg);
         }
-        this.bgObjects.push(bg);
-      }
 
-      // Dead zone fill for area outside the office grid
-      const deadZone = this.add.graphics();
-      deadZone.setDepth(0);
-      deadZone.fillStyle(0x1a1a2a, 1);
-      if (W > officeW) deadZone.fillRect(officeW, 0, W - officeW, H);
-      if (H > officeH) deadZone.fillRect(0, officeH, W, H - officeH);
-      this.bgObjects.push(deadZone);
-      return;
+        // Dead zone fill for area outside the office grid
+        const deadZone = this.add.graphics();
+        deadZone.setDepth(0);
+        deadZone.fillStyle(0x1a1a2a, 1);
+        if (W > officeW) deadZone.fillRect(officeW, 0, W - officeW, H);
+        if (H > officeH) deadZone.fillRect(0, officeH, W, H - officeH);
+        this.bgObjects.push(deadZone);
+        return;
+      } catch (err) {
+        console.warn("[OfficeScene] Custom background failed, falling back to procedural:", err);
+        // Clear the broken background so we don't keep failing on rebuilds
+        this.cachedBackground = null;
+        // Fall through to procedural background below
+      }
     }
 
     // Procedural office background
@@ -1221,20 +1342,31 @@ export class OfficeScene extends Phaser.Scene {
         // Skip items that were already created by the default layout
         if (this.furnitureContainers.has(item.id)) continue;
 
-        if (item.custom && item.customKey && this.cachedFurniture.has(item.customKey)) {
+        // Resolve the cache key — handles both "packId:key" and legacy bare keys
+        const resolvedKey = item.custom && item.customKey
+          ? this.resolveFurnitureKey(item.customKey, item.packId)
+          : undefined;
+
+        if (item.custom && resolvedKey) {
           // Custom pack furniture
-          const config = this.furnitureConfigs.get(item.customKey);
+          const config = this.furnitureConfigs.get(resolvedKey);
           this.createFurnitureContainer(item.id, item.type, item.x, item.y, {
             custom: true,
-            customKey: item.customKey,
+            customKey: resolvedKey,
+            packId: item.packId ?? this.packIdFromKey(resolvedKey),
             isDesk: item.isDesk ?? config?.desk ?? false,
             rotation: item.rotation,
           });
         } else if (item.id.startsWith("added-")) {
           // User-added furniture (builtin or custom pack)
+          // Skip custom pack items whose pack is not loaded
+          if (item.custom && item.customKey && !resolvedKey) {
+            continue;
+          }
           this.createFurnitureContainer(item.id, item.type, item.x, item.y, {
             custom: item.custom,
-            customKey: item.customKey,
+            customKey: resolvedKey ?? item.customKey,
+            packId: item.packId ?? (resolvedKey ? this.packIdFromKey(resolvedKey) : undefined),
             isDesk: item.isDesk,
             rotation: item.rotation,
           });
@@ -1247,12 +1379,36 @@ export class OfficeScene extends Phaser.Scene {
     this.rebuildDeskPositions();
   }
 
+  /** Resolve a furniture cache key. Tries the key as-is, then "packId:key",
+   *  then scans all namespaced entries for a bare-key suffix match. */
+  private resolveFurnitureKey(customKey: string, packId?: string): string | undefined {
+    // Exact match (already namespaced, or bare key with backward-compat entry)
+    if (this.cachedFurniture.has(customKey)) return customKey;
+    // Try "packId:key"
+    if (packId) {
+      const ns = `${packId}:${customKey}`;
+      if (this.cachedFurniture.has(ns)) return ns;
+    }
+    // Scan for any pack that has this bare key
+    for (const k of this.cachedFurniture.keys()) {
+      const colonIdx = k.indexOf(":");
+      if (colonIdx >= 0 && k.slice(colonIdx + 1) === customKey) return k;
+    }
+    return undefined;
+  }
+
+  /** Extract the packId portion from a namespaced key ("packId:itemKey"). */
+  private packIdFromKey(nsKey: string): string | undefined {
+    const idx = nsKey.indexOf(":");
+    return idx >= 0 ? nsKey.slice(0, idx) : undefined;
+  }
+
   private createFurnitureContainer(
     id: string,
     type: FurnitureItem["type"],
     tileX: number,
     tileY: number,
-    opts?: { custom?: boolean; customKey?: string; isDesk?: boolean; rotation?: number },
+    opts?: { custom?: boolean; customKey?: string; packId?: string; isDesk?: boolean; rotation?: number },
   ) {
     // Skip furniture the user has deleted
     if (this.removedFurnitureIds.has(id)) return;
@@ -1270,66 +1426,149 @@ export class OfficeScene extends Phaser.Scene {
     container.setData("furnitureId", id);
     container.setData("furnitureType", type);
 
-    // Custom furniture from asset pack — render PNG
+    // Custom furniture from asset pack — render PNG, fall back to builtin on failure
     const customCanvas = opts?.customKey
       ? this.cachedFurniture.get(opts.customKey)
       : undefined;
 
     if (customCanvas) {
-      const texKey = `furniture_${id}`;
-      if (this.textures.exists(texKey)) this.textures.remove(texKey);
-      this.textures.addImage(
-        texKey,
-        customCanvas as unknown as HTMLImageElement,
-      );
-      const config = this.furnitureConfigs.get(opts!.customKey!);
-      // Determine tile footprint:
-      // - If manifest specifies tiles, use those
-      // - If image is already at tile scale (dimensions >= TILE), divide by TILE
-      // - Otherwise, infer from aspect ratio: fit into 1-2 tiles
-      let tw: number, th: number;
-      if (config?.tilesWide != null && config?.tilesTall != null) {
-        tw = config.tilesWide;
-        th = config.tilesTall;
-      } else if (customCanvas.width >= TILE * 1.5 || customCanvas.height >= TILE * 1.5) {
-        // Large image — already at tile scale
-        tw = Math.max(1, Math.round(customCanvas.width / TILE));
-        th = Math.max(1, Math.round(customCanvas.height / TILE));
-      } else {
-        // Small pixel art — scale up based on aspect ratio
-        const ratio = customCanvas.width / customCanvas.height;
-        if (ratio > 1.8) {
-          tw = 2; th = 1; // wide
-        } else if (ratio < 0.55) {
-          tw = 1; th = 2; // tall
-        } else if (ratio > 1.2) {
-          tw = 2; th = 1; // somewhat wide
-        } else if (ratio < 0.8) {
-          tw = 1; th = 2; // somewhat tall
-        } else if (customCanvas.width > 50 || customCanvas.height > 50) {
-          tw = 2; th = 2; // biggish square
+      try {
+        if (!customCanvas.width || !customCanvas.height) throw new Error("empty furniture image");
+        const texKey = `furniture_${id}`;
+        if (this.textures.exists(texKey)) this.textures.remove(texKey);
+        this.textures.addImage(
+          texKey,
+          customCanvas as unknown as HTMLImageElement,
+        );
+        const config = this.furnitureConfigs.get(opts!.customKey!);
+        // Determine tile footprint:
+        // - If manifest specifies tiles, use those
+        // - If image is already at tile scale (dimensions >= TILE), divide by TILE
+        // - Otherwise, infer from aspect ratio: fit into 1-2 tiles
+        let tw: number, th: number;
+        if (config?.tilesWide != null && config?.tilesTall != null) {
+          tw = config.tilesWide;
+          th = config.tilesTall;
+        } else if (customCanvas.width >= TILE * 1.5 || customCanvas.height >= TILE * 1.5) {
+          // Large image — already at tile scale
+          tw = Math.max(1, Math.round(customCanvas.width / TILE));
+          th = Math.max(1, Math.round(customCanvas.height / TILE));
         } else {
-          tw = 1; th = 1; // small square
+          // Small pixel art — scale up based on aspect ratio
+          const ratio = customCanvas.width / customCanvas.height;
+          if (ratio > 1.8) {
+            tw = 2; th = 1; // wide
+          } else if (ratio < 0.55) {
+            tw = 1; th = 2; // tall
+          } else if (ratio > 1.2) {
+            tw = 2; th = 1; // somewhat wide
+          } else if (ratio < 0.8) {
+            tw = 1; th = 2; // somewhat tall
+          } else if (customCanvas.width > 50 || customCanvas.height > 50) {
+            tw = 2; th = 2; // biggish square
+          } else {
+            tw = 1; th = 1; // small square
+          }
+        }
+        const sprite = this.add.sprite(0, 0, texKey);
+        sprite.setOrigin(0, 0);
+        sprite.setDisplaySize(tw * TILE, th * TILE);
+        sprite.setAngle(rotation);
+        // Adjust origin for rotation
+        if (rotation === 90) {
+          sprite.setOrigin(0, 1);
+        } else if (rotation === 180) {
+          sprite.setOrigin(1, 1);
+        } else if (rotation === 270) {
+          sprite.setOrigin(1, 0);
+        }
+        container.add(sprite);
+
+        const effW = rotation === 90 || rotation === 270 ? th : tw;
+        const effH = rotation === 90 || rotation === 270 ? tw : th;
+        const hitW = effW * TILE;
+        const hitH = effH * TILE;
+        container.setSize(hitW, hitH);
+        container.setInteractive({ cursor: "pointer" });
+
+        this.addFurnitureInteractions(container, id, hitW);
+
+        this.furnitureContainers.set(id, container);
+        this.furnitureItems.push({
+          id,
+          type,
+          x: tileX,
+          y: tileY,
+          rotation,
+          custom: true,
+          customKey: opts?.customKey,
+          packId: opts?.packId,
+          isDesk: opts?.isDesk,
+        });
+        return;
+      } catch (err) {
+        console.warn(`[furniture] Custom furniture ${id} failed:`, err);
+        // Remove broken entry so it doesn't keep failing
+        if (opts?.customKey) this.cachedFurniture.delete(opts.customKey);
+        // Only fall through if there's a matching builtin drawing; otherwise remove
+        if (!OfficeScene.BUILTIN_FURNITURE.some((b) => b.type === type)) {
+          container.destroy();
+          return;
         }
       }
+    }
+
+    // Builtin furniture — procedural drawing
+    try {
+      const g = this.add.graphics();
+
+      drawBuiltinFurniture(type, g);
+
+      // Determine base tile size
+      const wideTypes = new Set([
+        "desk",
+        "bookshelf",
+        "whiteboard",
+        "couch",
+        "snack-machine",
+        "ping-pong",
+        "tv",
+      ]);
+      const tallTypes = new Set([
+        "desk",
+        "snack-machine",
+        "filing-cabinet",
+        "server-rack",
+      ]);
+      const baseTW = wideTypes.has(type) ? 2 : 1;
+      const baseTH = tallTypes.has(type) ? 2 : 1;
+      const baseW = baseTW * TILE;
+      const baseH = baseTH * TILE;
+
+      // Snapshot the procedural graphics to a texture so rotation works properly
+      const texKey = `builtin_${id}_${rotation}`;
+      if (this.textures.exists(texKey)) this.textures.remove(texKey);
+      const rt = this.add.renderTexture(0, 0, baseW, baseH);
+      rt.draw(g, 0, 0);
+      rt.saveTexture(texKey);
+      rt.destroy();
+      g.destroy();
+
       const sprite = this.add.sprite(0, 0, texKey);
       sprite.setOrigin(0, 0);
-      sprite.setDisplaySize(tw * TILE, th * TILE);
-      sprite.setAngle(rotation);
-      // Adjust origin for rotation
-      if (rotation === 90) {
-        sprite.setOrigin(0, 1);
-      } else if (rotation === 180) {
-        sprite.setOrigin(1, 1);
-      } else if (rotation === 270) {
-        sprite.setOrigin(1, 0);
+      if (rotation) {
+        sprite.setAngle(rotation);
+        if (rotation === 90) sprite.setOrigin(0, 1);
+        else if (rotation === 180) sprite.setOrigin(1, 1);
+        else if (rotation === 270) sprite.setOrigin(1, 0);
       }
       container.add(sprite);
 
-      const effW = rotation === 90 || rotation === 270 ? th : tw;
-      const effH = rotation === 90 || rotation === 270 ? tw : th;
-      const hitW = effW * TILE;
-      const hitH = effH * TILE;
+      // Effective hit area accounts for rotation swapping width/height
+      const effTW = rotation === 90 || rotation === 270 ? baseTH : baseTW;
+      const effTH = rotation === 90 || rotation === 270 ? baseTW : baseTH;
+      const hitW = effTW * TILE;
+      const hitH = effTH * TILE;
       container.setSize(hitW, hitH);
       container.setInteractive({ cursor: "pointer" });
 
@@ -1342,79 +1581,16 @@ export class OfficeScene extends Phaser.Scene {
         x: tileX,
         y: tileY,
         rotation,
-        custom: true,
+        custom: opts?.custom,
         customKey: opts?.customKey,
-        isDesk: opts?.isDesk,
+        packId: opts?.packId,
+        isDesk: opts?.isDesk ?? (type === "desk"),
       });
-      return;
+    } catch (err) {
+      // Last resort — destroy the empty container so it doesn't linger
+      console.warn(`[furniture] Builtin furniture ${id} (${type}) failed:`, err);
+      container.destroy();
     }
-
-    // Builtin furniture — procedural drawing
-    const g = this.add.graphics();
-
-    drawBuiltinFurniture(type, g);
-
-    // Determine base tile size
-    const wideTypes = new Set([
-      "desk",
-      "bookshelf",
-      "whiteboard",
-      "couch",
-      "snack-machine",
-      "ping-pong",
-      "tv",
-    ]);
-    const tallTypes = new Set([
-      "desk",
-      "snack-machine",
-      "filing-cabinet",
-      "server-rack",
-    ]);
-    const baseTW = wideTypes.has(type) ? 2 : 1;
-    const baseTH = tallTypes.has(type) ? 2 : 1;
-    const baseW = baseTW * TILE;
-    const baseH = baseTH * TILE;
-
-    // Snapshot the procedural graphics to a texture so rotation works properly
-    const texKey = `builtin_${id}_${rotation}`;
-    if (this.textures.exists(texKey)) this.textures.remove(texKey);
-    const rt = this.add.renderTexture(0, 0, baseW, baseH);
-    rt.draw(g, 0, 0);
-    rt.saveTexture(texKey);
-    rt.destroy();
-    g.destroy();
-
-    const sprite = this.add.sprite(0, 0, texKey);
-    sprite.setOrigin(0, 0);
-    if (rotation) {
-      sprite.setAngle(rotation);
-      if (rotation === 90) sprite.setOrigin(0, 1);
-      else if (rotation === 180) sprite.setOrigin(1, 1);
-      else if (rotation === 270) sprite.setOrigin(1, 0);
-    }
-    container.add(sprite);
-
-    // Effective hit area accounts for rotation swapping width/height
-    const effTW = rotation === 90 || rotation === 270 ? baseTH : baseTW;
-    const effTH = rotation === 90 || rotation === 270 ? baseTW : baseTH;
-    const hitW = effTW * TILE;
-    const hitH = effTH * TILE;
-    container.setSize(hitW, hitH);
-    container.setInteractive({ cursor: "pointer" });
-
-    this.addFurnitureInteractions(container, id, hitW);
-
-    this.furnitureContainers.set(id, container);
-    this.furnitureItems.push({
-      id,
-      type,
-      x: tileX,
-      y: tileY,
-      rotation,
-      custom: opts?.custom,
-      customKey: opts?.customKey,
-      isDesk: opts?.isDesk ?? (type === "desk"),
-    });
   }
 
   /** Persist the current furniture layout including tombstones for removed defaults. */
@@ -1710,7 +1886,7 @@ export class OfficeScene extends Phaser.Scene {
     id: string,
     _hitW: number,
   ) {
-    // Long press (500ms) opens edit mode
+    // Long press (250ms) opens edit mode
     container.on("pointerdown", (pointer: Phaser.Input.Pointer) => {
       if (pointer.rightButtonDown()) return;
       if (this.longPressTimer) clearTimeout(this.longPressTimer);
@@ -1720,7 +1896,7 @@ export class OfficeScene extends Phaser.Scene {
           // Start manual drag immediately — pointer is still held
           this.startFurnitureDrag(container, pointer);
         }
-      }, 500);
+      }, 250);
     });
 
     container.on("pointerup", () => {
@@ -1843,26 +2019,42 @@ export class OfficeScene extends Phaser.Scene {
    * Resolve a cached sprite sheet canvas for an agent.
    * Priority: per-agent override → exact role match → hash-based rotation.
    */
+  /** Validate a cached sheet canvas — remove and return null if broken. */
+  private validateSheet(key: string): HTMLCanvasElement | null {
+    const canvas = this.cachedSheets.get(key);
+    if (!canvas || !canvas.width || !canvas.height) {
+      this.cachedSheets.delete(key);
+      return null;
+    }
+    return canvas;
+  }
+
   private resolveSheetForAgent(agent: Agent): HTMLCanvasElement | null {
     if (!this.activePack || this.cachedSheets.size === 0) return null;
 
     // Per-agent override (set in AgentEditor)
-    if (agent.spriteSheet && this.cachedSheets.has(agent.spriteSheet)) {
-      return this.cachedSheets.get(agent.spriteSheet)!;
+    if (agent.spriteSheet) {
+      const sheet = this.validateSheet(agent.spriteSheet);
+      if (sheet) return sheet;
+      // Override not available — fall through to other sources
     }
 
     // Exact role match
     const role = agent.role.toLowerCase();
-    if (this.cachedSheets.has(role)) return this.cachedSheets.get(role)!;
+    if (this.cachedSheets.has(role)) {
+      const sheet = this.validateSheet(role);
+      if (sheet) return sheet;
+    }
 
     // Distribute sheets across agents using a stable hash of the agent ID
+    if (this.cachedSheets.size === 0) return null; // all sheets may have been pruned
     const sheetKeys = [...this.cachedSheets.keys()];
     let hash = 0;
     for (let i = 0; i < agent.id.length; i++) {
       hash = ((hash << 5) - hash + agent.id.charCodeAt(i)) | 0;
     }
     const idx = Math.abs(hash) % sheetKeys.length;
-    return this.cachedSheets.get(sheetKeys[idx]) ?? null;
+    return this.validateSheet(sheetKeys[idx]);
   }
 
   private createAgentSprite(agent: Agent) {
@@ -1894,16 +2086,28 @@ export class OfficeScene extends Phaser.Scene {
     let animKeys: Record<AnimState, string>;
     const sheetCanvas = this.resolveSheetForAgent(agent);
     if (sheetCanvas) {
-      const employees = this.activePack!.manifest.categories.employees!;
-      animKeys = registerAgentFromSheet(this, agent.id, sheetCanvas, {
-        frameSize: employees.frameSize,
-        frameWidth: employees.frameWidth,
-        frameHeight: employees.frameHeight,
-        framesPerState: employees.framesPerState,
-        rows: employees.rows,
-        states: employees.states,
-        frameRates: employees.frameRates,
-      });
+      try {
+        const employees = this.activePack?.manifest.categories.employees;
+        if (!employees) throw new Error("no employees config");
+        animKeys = registerAgentFromSheet(this, agent.id, sheetCanvas, {
+          frameSize: employees.frameSize,
+          frameWidth: employees.frameWidth,
+          frameHeight: employees.frameHeight,
+          framesPerState: employees.framesPerState,
+          rows: employees.rows,
+          states: employees.states,
+          frameRates: employees.frameRates,
+        });
+      } catch (err) {
+        console.warn(`[sprites] Failed to load sheet for ${agent.id}, falling back to procedural:`, err);
+        // Remove the broken sheet from cache so we don't keep failing
+        for (const [k, v] of this.cachedSheets) {
+          if (v === sheetCanvas) { this.cachedSheets.delete(k); break; }
+        }
+        const shirtColor = parseInt(agent.color.replace("#", ""), 16);
+        const palette = buildPalette(shirtColor, this.agentIndex++);
+        animKeys = registerAgentTextures(this, agent.id, palette);
+      }
     } else {
       const shirtColor = parseInt(agent.color.replace("#", ""), 16);
       const palette = buildPalette(shirtColor, this.agentIndex++);

@@ -28,8 +28,6 @@ export default function OfficeCanvas({
   agentsRef.current = agents;
 
   useEffect(() => {
-    let game: import("phaser").Game;
-
     async function initPhaser() {
       const Phaser = await import("phaser");
       const { OfficeScene } = await import("../phaser/OfficeScene");
@@ -44,7 +42,7 @@ export default function OfficeCanvas({
       sceneRef.current = scene;
 
       const rect = containerRef.current.getBoundingClientRect();
-      game = new Phaser.Game({
+      const game = new Phaser.Game({
         type: Phaser.AUTO,
         width: Math.floor(rect.width) || 768,
         height: Math.floor(rect.height) || 480,

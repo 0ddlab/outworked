@@ -28,6 +28,11 @@
       "how_it_works": "A single PNG that replaces the entire office floor, walls, and windows.",
       "modes": "'cover' (default) scales to fill maintaining aspect ratio. 'stretch' distorts to fit. 'tile' repeats the image.",
       "recommended_size": "768x480 or larger for best quality (matches default 16x10 tile grid)."
+    },
+    "font": {
+      "how_it_works": "A .ttf, .woff, .woff2, or .otf font file that replaces the default pixel font in the UI.",
+      "auto_detect": "Drop a font file in the pack root — it's auto-detected. Or set 'file' and optional 'name' in manifest.",
+      "name": "Optional. The font-family name for the @font-face rule. Defaults to 'CustomPixelFont'."
     }
   },
   "categories": {

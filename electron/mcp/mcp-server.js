@@ -276,6 +276,21 @@ const BUILTIN_TOOLS = [
     inputSchema: { type: "object", properties: {} },
   },
   {
+    name: "get_app_documentation",
+    description:
+      "Get all Outworked app documentation including README, guides, and feature docs. Use this when a user asks about how the app works, its features, how to configure things, or anything about the product.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        topic: {
+          type: "string",
+          description:
+            'Optional topic to filter docs (e.g. "skills", "triggers", "channels", "assets"). Omit to get everything.',
+        },
+      },
+    },
+  },
+  {
     name: "list_skills",
     description:
       "List all available skills with their documentation and connection status. Use this to discover what capabilities (tools) are available to you and how to use them.",
@@ -296,23 +311,37 @@ const BUILTIN_TOOLS = [
         },
         pattern: {
           type: "string",
-          description: "Regex pattern (message-pattern) or event type (skill-event)",
+          description:
+            "Regex pattern (message-pattern) or event type (skill-event)",
         },
-        channelId: { type: "string", description: "Scope to a channel (message-pattern only)" },
+        channelId: {
+          type: "string",
+          description: "Scope to a channel (message-pattern only)",
+        },
         senderAllowlist: {
           type: "string",
           description: 'Comma-separated senders, or "*" for any (default: "*")',
         },
-        agentId: { type: "string", description: "Target agent ID (omit for boss)" },
-        prompt: { type: "string", description: "Prompt template with $1/$2 or {{key}} placeholders" },
-        enabled: { type: "boolean", description: "Active state (default: true)" },
+        agentId: {
+          type: "string",
+          description: "Target agent ID (omit for boss)",
+        },
+        prompt: {
+          type: "string",
+          description: "Prompt template with $1/$2 or {{key}} placeholders",
+        },
+        enabled: {
+          type: "boolean",
+          description: "Active state (default: true)",
+        },
       },
       required: ["name", "type", "prompt"],
     },
   },
   {
     name: "list_triggers",
-    description: "List all configured triggers with their type, pattern, target agent, enabled status, and fire count.",
+    description:
+      "List all configured triggers with their type, pattern, target agent, enabled status, and fire count.",
     inputSchema: { type: "object", properties: {} },
   },
   {
@@ -344,6 +373,93 @@ const BUILTIN_TOOLS = [
     },
   },
 ];
+
+// ─── App documentation collector ────────────────────────────────
+
+/**
+ * Collect all markdown documentation from the app.
+ * Walks known doc locations and returns them tagged by source.
+ */
+function collectAppDocs(topic) {
+  const appRoot = path.resolve(__dirname, "../..");
+  const docs = [];
+
+  // Known doc files and their topics
+  const docFiles = [
+    { file: "README.md", topic: null, label: "README" },
+    {
+      file: "electron/triggers/triggers.md",
+      topic: "triggers",
+      label: "Triggers",
+    },
+    {
+      file: "electron/channels/imessage-channel.md",
+      topic: "channels",
+      label: "iMessage Channel",
+    },
+    {
+      file: "electron/channels/slack-channel.md",
+      topic: "channels",
+      label: "Slack Channel",
+    },
+  ];
+
+  // Collect SKILL.md files from skill runtimes
+  const skillsDir = path.join(__dirname, "../skills");
+  try {
+    for (const entry of fs.readdirSync(skillsDir, { withFileTypes: true })) {
+      if (entry.isDirectory()) {
+        const skillMd = path.join(skillsDir, entry.name, "SKILL.md");
+        if (fs.existsSync(skillMd)) {
+          docFiles.push({
+            file: path.relative(appRoot, skillMd),
+            topic: "skills",
+            label: `Skill: ${entry.name}`,
+          });
+        }
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+
+  // Also check for assets readme
+  const assetsReadme = path.join(
+    os.homedir(),
+    ".outworked",
+    "assets",
+    "README.md",
+  );
+  if (fs.existsSync(assetsReadme)) {
+    docFiles.push({
+      file: null,
+      absPath: assetsReadme,
+      topic: "assets",
+      label: "Assets README",
+    });
+  }
+
+  for (const entry of docFiles) {
+    // Filter by topic if provided
+    if (topic && entry.topic && entry.topic !== topic) continue;
+
+    const absPath = entry.absPath || path.join(appRoot, entry.file);
+    try {
+      const content = fs.readFileSync(absPath, "utf-8");
+      docs.push(`# ${entry.label}\n\n${content}`);
+    } catch {
+      // File doesn't exist — skip
+    }
+  }
+
+  if (docs.length === 0) {
+    return topic
+      ? `No documentation found for topic "${topic}".`
+      : "No documentation found.";
+  }
+
+  return docs.join("\n\n---\n\n");
+}
 
 // ─── Skill documentation ─────────────────────────────────────────
 
@@ -558,7 +674,10 @@ async function executeTool(name, args) {
     case "create_trigger": {
       const id = `trigger-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
       const allowlist = args.senderAllowlist
-        ? args.senderAllowlist.split(",").map((s) => s.trim()).filter(Boolean)
+        ? args.senderAllowlist
+            .split(",")
+            .map((s) => s.trim())
+            .filter(Boolean)
         : ["*"];
       db.triggerCreate({
         id,
@@ -576,10 +695,13 @@ async function executeTool(name, args) {
       try {
         const triggerEngine = require("../triggers/trigger-engine");
         triggerEngine.refreshPatterns();
-      } catch { /* ignore if not loaded */ }
-      const webhookHint = args.type === "webhook"
-        ? `\nWebhook URL: POST http://127.0.0.1:7891/trigger/${id}`
-        : "";
+      } catch {
+        /* ignore if not loaded */
+      }
+      const webhookHint =
+        args.type === "webhook"
+          ? `\nWebhook URL: POST http://127.0.0.1:7891/trigger/${id}`
+          : "";
       return `Trigger created: [${id}] "${args.name}" (${args.type})${webhookHint}`;
     }
     case "list_triggers": {
@@ -602,7 +724,9 @@ async function executeTool(name, args) {
       try {
         const triggerEngine = require("../triggers/trigger-engine");
         triggerEngine.refreshPatterns();
-      } catch { /* ignore */ }
+      } catch {
+        /* ignore */
+      }
       return `Trigger ${args.triggerId} updated.`;
     }
     case "delete_trigger": {
@@ -611,8 +735,13 @@ async function executeTool(name, args) {
       try {
         const triggerEngine = require("../triggers/trigger-engine");
         triggerEngine.refreshPatterns();
-      } catch { /* ignore */ }
+      } catch {
+        /* ignore */
+      }
       return `Trigger ${args.triggerId} deleted.`;
+    }
+    case "get_app_documentation": {
+      return collectAppDocs(args.topic || null);
     }
     case "list_skills": {
       const sections = [];

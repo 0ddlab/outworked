@@ -118,6 +118,8 @@ function mergeRuntimeState(prev: Agent[], fresh: Agent[]): Agent[] {
     if (!p) return f;
     return {
       ...f,
+      // Preserve in-memory spriteSheet when disk version is missing (write may be pending)
+      spriteSheet: f.spriteSheet ?? p.spriteSheet,
       status: p.status,
       currentThought: p.currentThought,
       todos: p.todos,
@@ -422,21 +424,26 @@ export default function App() {
     );
   }, [selectedAgentId]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  const agentsRef = useRef(agents);
+  agentsRef.current = agents;
+
   const updateAgent = useCallback((updated: Agent) => {
-    setAgents((prev) => {
-      const old = prev.find((a) => a.id === updated.id);
-      const next = prev.map((a) => (a.id === updated.id ? updated : a));
-      // Only write to disk if a persistent (non-ephemeral) field changed
-      if (old) {
-        const hasPersistentChange = (
-          Object.keys(updated) as (keyof Agent)[]
-        ).some((k) => !EPHEMERAL_KEYS.has(k) && updated[k] !== old[k]);
-        if (hasPersistentChange) {
-          saveAgentToDisk(updated, workspaceDirRef.current || undefined);
-        }
-      }
-      return next;
-    });
+    // Check for persistent changes against the current state (via ref)
+    const old = agentsRef.current.find((a) => a.id === updated.id);
+    const hasPersistentChange =
+      old &&
+      (Object.keys(updated) as (keyof Agent)[]).some(
+        (k) => !EPHEMERAL_KEYS.has(k) && updated[k] !== old[k],
+      );
+
+    setAgents((prev) =>
+      prev.map((a) => (a.id === updated.id ? updated : a)),
+    );
+
+    // Disk write outside the state updater — safe from StrictMode double-fire
+    if (hasPersistentChange) {
+      saveAgentToDisk(updated, workspaceDirRef.current || undefined);
+    }
   }, []);
 
   const pushNotification = useCallback(
@@ -618,7 +625,6 @@ export default function App() {
 
   function handleSaveAgent(updated: Agent) {
     updateAgent(updated);
-    setRightPanel("chat");
   }
 
   function handleDeleteAgent(agentId: string) {

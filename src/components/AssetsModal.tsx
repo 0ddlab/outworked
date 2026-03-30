@@ -80,18 +80,22 @@ export default function AssetsModal({ onClose }: Props) {
     window.dispatchEvent(new Event("asset-pack-changed"));
   };
 
-  const handleAddFurniture = (key: string) => {
-    window.dispatchEvent(new CustomEvent("furniture-add", { detail: { key } }));
+  const handleAddFurniture = (key: string, packId?: string) => {
+    const eventKey = packId ? `${packId}:${key}` : key;
+    window.dispatchEvent(
+      new CustomEvent("furniture-add", { detail: { key: eventKey } }),
+    );
     // Optimistically add to placed list
     setPlacedCustom((prev) => [
       ...prev,
       {
-        id: `custom-${key}-${Date.now()}`,
+        id: `custom-${eventKey}-${Date.now()}`,
         type: key,
         x: 0,
         y: 0,
-        custom: true,
-        customKey: key,
+        custom: !!packId,
+        customKey: packId ? eventKey : undefined,
+        packId,
       },
     ]);
   };
@@ -106,18 +110,26 @@ export default function AssetsModal({ onClose }: Props) {
   const w = window as unknown as { electronAPI?: { homedir?: string } };
   const home = w.electronAPI?.homedir ?? "~";
 
-  const activePack = packs.find((p) => p.id === activeId);
-  const furnitureItems = activePack?.manifest.categories.furniture?.items;
-  const hasFurniture = furnitureItems && Object.keys(furnitureItems).length > 0;
-
-  // Normalize furniture configs for display
-  const furnitureEntries: [string, FurnitureItemConfig & { desk: boolean }][] =
-    furnitureItems
-      ? Object.entries(furnitureItems).map(([key, entry]) => [
-          key,
-          normalizeFurnitureItem(key, entry),
-        ])
-      : [];
+  // Collect furniture from ALL packs (not just active)
+  const allPackFurniture: {
+    packId: string;
+    packName: string;
+    entries: [string, FurnitureItemConfig & { desk: boolean }][];
+  }[] = packs
+    .filter((p) => p.manifest.categories.furniture)
+    .map((p) => ({
+      packId: p.id,
+      packName: p.manifest.name,
+      entries: Object.entries(p.manifest.categories.furniture!.items).map(
+        ([key, entry]) =>
+          [key, normalizeFurnitureItem(key, entry)] as [
+            string,
+            FurnitureItemConfig & { desk: boolean },
+          ],
+      ),
+    }))
+    .filter((p) => p.entries.length > 0);
+  const hasFurniture = allPackFurniture.length > 0;
 
   return (
     <div
@@ -274,63 +286,44 @@ export default function AssetsModal({ onClose }: Props) {
                 </div>
               )}
 
-              <div className="border-t border-slate-700 pt-3 mt-3 space-y-2">
-                <div className="flex gap-2">
-                  <button
-                    onClick={async () => {
-                      const newId = await importAssetPack();
-                      if (newId) {
-                        const updated = await listAssetPacks();
-                        setPacks(updated);
-                      }
-                    }}
-                    className="flex-1 btn-pixel text-[10px] py-2 bg-indigo-700 hover:bg-indigo-600 text-white rounded cursor-pointer"
-                  >
-                    Import Pack...
-                  </button>
-                  <button
-                    onClick={() => openAssetsFolder()}
-                    className="btn-pixel text-[10px] py-2 px-3 bg-slate-700 hover:bg-slate-600 text-slate-200 rounded cursor-pointer"
-                  >
-                    Open Folder
-                  </button>
-                </div>
-              </div>
             </>
           ) : tab === "furniture" ? (
             /* ── Furniture tab ── */
             <>
-              {/* Custom pack furniture */}
-              {hasFurniture && (
-                <>
-                  <p className="text-[9px] font-pixel text-slate-500 uppercase mt-4">
-                    From Pack
-                  </p>
-                  <div className="space-y-1">
-                    {furnitureEntries.map(([key, config]) => (
-                      <div
-                        key={key}
-                        className="flex items-center justify-between p-2 rounded border border-slate-600 bg-slate-700/50"
-                      >
-                        <div className="flex items-center gap-2">
-                          <span className="text-[11px] text-white">{key}</span>
-                          {config.desk && (
-                            <span className="text-[8px] px-1.5 py-0.5 rounded bg-emerald-900/50 text-emerald-300 border border-emerald-700/50">
-                              desk
-                            </span>
-                          )}
-                        </div>
-                        <button
-                          onClick={() => handleAddFurniture(key)}
-                          className="text-[9px] font-pixel px-2 py-1 rounded bg-indigo-700 hover:bg-indigo-600 text-white cursor-pointer"
+              {/* Custom pack furniture — from all packs */}
+              {hasFurniture &&
+                allPackFurniture.map((packGroup) => (
+                  <div key={packGroup.packId}>
+                    <p className="text-[9px] font-pixel text-slate-500 uppercase mt-4">
+                      {packGroup.packName}
+                    </p>
+                    <div className="space-y-1">
+                      {packGroup.entries.map(([key, config]) => (
+                        <div
+                          key={`${packGroup.packId}:${key}`}
+                          className="flex items-center justify-between p-2 rounded border border-slate-600 bg-slate-700/50"
                         >
-                          + Add
-                        </button>
-                      </div>
-                    ))}
+                          <div className="flex items-center gap-2">
+                            <span className="text-[11px] text-white">{key}</span>
+                            {config.desk && (
+                              <span className="text-[8px] px-1.5 py-0.5 rounded bg-emerald-900/50 text-emerald-300 border border-emerald-700/50">
+                                desk
+                              </span>
+                            )}
+                          </div>
+                          <button
+                            onClick={() =>
+                              handleAddFurniture(key, packGroup.packId)
+                            }
+                            className="text-[9px] font-pixel px-2 py-1 rounded bg-indigo-700 hover:bg-indigo-600 text-white cursor-pointer"
+                          >
+                            + Add
+                          </button>
+                        </div>
+                      ))}
+                    </div>
                   </div>
-                </>
-              )}
+                ))}
 
               {/* Builtin furniture */}
               <p className="text-[9px] font-pixel text-slate-500 uppercase">
@@ -398,7 +391,7 @@ export default function AssetsModal({ onClose }: Props) {
                 <p className="text-[10px] text-slate-500">
                   Add PNGs to{" "}
                   <code className="text-slate-400">
-                    {home}/.outworked/assets/{activeId ?? "pack"}/furniture/
+                    {home}/.outworked/assets/{"<pack>"}/furniture/
                   </code>
                   . Files named <code className="text-slate-400">desk*</code>{" "}
                   are auto-detected as desks. Right-click to rotate in the
@@ -416,6 +409,36 @@ export default function AssetsModal({ onClose }: Props) {
               )}
             </div>
           )}
+        </div>
+
+        {/* Footer */}
+        <div className="flex items-center justify-between px-4 py-3 border-t border-slate-700">
+          <button
+            onClick={onClose}
+            className="btn-pixel text-[11px] py-2 px-6 bg-indigo-600 hover:bg-indigo-500 text-white rounded cursor-pointer font-pixel"
+          >
+            OK
+          </button>
+          <div className="flex gap-2">
+            <button
+              onClick={async () => {
+                const newId = await importAssetPack();
+                if (newId) {
+                  const updated = await listAssetPacks();
+                  setPacks(updated);
+                }
+              }}
+              className="btn-pixel text-[9px] py-1.5 px-3 bg-slate-700 hover:bg-slate-600 text-slate-200 rounded cursor-pointer font-pixel"
+            >
+              Import...
+            </button>
+            <button
+              onClick={() => openAssetsFolder()}
+              className="btn-pixel text-[9px] py-1.5 px-3 bg-slate-700 hover:bg-slate-600 text-slate-200 rounded cursor-pointer font-pixel"
+            >
+              Open Folder
+            </button>
+          </div>
         </div>
       </div>
     </div>

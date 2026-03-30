@@ -5,7 +5,7 @@ Outworked supports custom asset packs that let you completely reskin the office.
 ## Quick Start
 
 1. Click the grid icon in the sidebar header to open the **Assets** modal
-2. Click **Import Pack...** to select a folder, or **Open Folder** to add files directly to `~/.outworked/assets/`
+2. Click **Import...** to select a folder or `.zip` file, or **Open Folder** to add files directly to `~/.outworked/assets/`
 3. Select your pack from the list — changes apply immediately
 
 No manifest needed for simple packs. The app auto-detects PNGs, fonts, and backgrounds.
@@ -277,7 +277,7 @@ The font replaces all UI text using the pixel font style (headers, buttons, labe
 
 Click the **grid icon** in the sidebar header (next to "AI Agent HQ") to open the Assets modal:
 
-- **Packs tab** — Select the active pack. Click **Import Pack...** to copy a pack from anywhere on your machine, or **Open Folder** to open `~/.outworked/assets/` in Finder.
+- **Packs tab** — Select the active pack. Click **Import...** to import a folder or `.zip` file from anywhere on your machine, or **Open Folder** to open `~/.outworked/assets/` in Finder.
 - **Furniture tab** — Add built-in or custom furniture items to the office. Remove items you've added.
 - **Info tab** — This documentation.
 
@@ -285,7 +285,7 @@ Switching packs applies all changes immediately — no restart needed.
 
 ### Sharing Packs
 
-Packs are self-contained folders. To share one, just zip the folder and send it. To install, unzip into `~/.outworked/assets/` or use **Import Pack**.
+Packs are self-contained folders. To share one, just zip the folder and send it. To install, use **Import...** to load the `.zip` directly, or unzip into `~/.outworked/assets/`.
 
 ### Bundled Pack
 
@@ -324,7 +324,7 @@ The `outworked-default` pack is installed automatically on first launch. It incl
 | `assets:listPacks` | Scan and return all available packs |
 | `assets:getActivePack` | Get active pack ID from settings |
 | `assets:setActivePack` | Set active pack ID |
-| `assets:importPack` | Open folder picker, copy to assets dir |
+| `assets:importPack` | Open file/folder picker, copy or extract to assets dir |
 | `assets:openFolder` | Open assets dir in native file manager |
 | `assets:getReadme` | Return this documentation as markdown |
 

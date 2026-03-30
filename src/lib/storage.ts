@@ -121,6 +121,7 @@ export function buildSubagentMd(agent: Agent, slug: string): string {
   fm += `outworked-position: ${agent.position.x},${agent.position.y}\n`;
   fm += `outworked-sprite: ${agent.spriteKey}\n`;
   fm += `outworked-color: ${agent.color}\n`;
+  if (agent.spriteSheet) fm += `outworked-sprite-sheet: ${agent.spriteSheet}\n`;
   if (agent.autoCreated) fm += `outworked-auto-created: true\n`;
   if (agent.isBoss) fm += `outworked-boss: true\n`;
   if (agent.skills && agent.skills.length > 0) {
@@ -386,6 +387,7 @@ export function parseSubagentFrontmatter(content: string): {
     "outworked-position"?: string;
     "outworked-sprite"?: string;
     "outworked-color"?: string;
+    "outworked-sprite-sheet"?: string;
     "outworked-auto-created"?: boolean;
     "outworked-boss"?: boolean;
     "outworked-skills"?: unknown;
@@ -779,6 +781,7 @@ export async function loadAgentsFromDisk(
       position,
       spriteKey,
       color,
+      spriteSheet: def["outworked-sprite-sheet"] || undefined,
       isBoss,
       autoCreated,
       subagentFile: file.path,
