@@ -5,8 +5,8 @@
 <h1 align="center">Outworked</h1>
 
 <p align="center">
-  <a href="https://github.com/outworked/outworked/releases/download/v0.4.1/Outworked-0.4.1-arm64.dmg">
-    <img src="https://img.shields.io/badge/Download_for_macOS-v0.4.1-brightgreen?style=for-the-badge&logo=apple" alt="Download for macOS" />
+  <a href="https://github.com/outworked/outworked/releases/download/v0.4.2/Outworked-0.4.2-arm64.dmg">
+    <img src="https://img.shields.io/badge/Download_for_macOS-v0.4.2-brightgreen?style=for-the-badge&logo=apple" alt="Download for macOS" />
   </a>
 </p>
 
@@ -22,7 +22,7 @@
 
 <p align="center">
   <a href="https://github.com/outworked/outworked/stargazers"><img src="https://img.shields.io/github/stars/outworked/outworked?style=social" alt="GitHub Stars" /></a>
-  <a href="https://github.com/outworked/outworked/releases"><img src="https://img.shields.io/badge/version-0.4.1-green.svg" alt="Version" /></a>
+  <a href="https://github.com/outworked/outworked/releases"><img src="https://img.shields.io/badge/version-0.4.2-green.svg" alt="Version" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-GPL%203.0-blue.svg" alt="License: GPL-3.0" /></a>
   <img src="https://img.shields.io/badge/platform-macOS-lightgrey.svg" alt="Platform" />
 </p>
