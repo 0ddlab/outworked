@@ -48,6 +48,8 @@
 
 ## What's New
 
+**v0.4.2** — Added browse:type for better browser handling.
+
 **v0.4.1** — Pop-out chat windows, fixed asset pack zip import and spaces in directory paths, fixed custom sprite loading.
 
 **v0.4.0** — Asset packs system: custom sprites, furniture, backgrounds, and fonts. Multi-pack support with fallthrough. Music player now plays user-added tracks.
