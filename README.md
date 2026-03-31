@@ -37,6 +37,7 @@
 
 <p align="center">
   <a href="https://github.com/outworked/outworked/releases/"><strong>Download</strong></a> ·
+  <a href="#whats-new"><strong>What's New</strong></a> ·
   <a href="#how-it-works"><strong>How It Works</strong></a> ·
   <a href="#example-workflows"><strong>Examples</strong></a> ·
   <a href="#capabilities"><strong>Capabilities</strong></a> ·
@@ -46,6 +47,20 @@
   <a href="#channels--triggers"><strong>Channels & Triggers</strong></a> ·
   <a href="#asset-packs--customize-your-office"><strong>Asset Packs</strong></a>
 </p>
+
+---
+
+## What's New
+
+**v0.4.1** — Pop-out chat windows, fixed asset pack zip import and spaces in directory paths, fixed custom sprite loading.
+
+**v0.4.0** — Asset packs system: custom sprites, furniture, backgrounds, and fonts. Multi-pack support with fallthrough. Music player now plays user-added tracks.
+
+**v0.3.1** — Slack channel support, triggers UI, improved MCP server wiring, better channel reliability.
+
+**v0.3.0** — SQLite storage, iMessage channels, scheduled triggers, skills system, MCP server integration.
+
+See the full [Version History](#version-history) below.
 
 ---
 
@@ -481,6 +496,25 @@ Click the grid icon in the sidebar header to open the **Assets** modal:
 A bundled example pack (`outworked-default`) is installed on first launch as a starting point. See `~/.outworked/assets/outworked-default/manifest.json` for a fully documented example manifest.
 
 Full documentation: [`electron/assets/assets.md`](electron/assets/assets.md)
+
+---
+
+## Version History
+
+| Version   | Date       | Highlights                                                                                                          |
+| --------- | ---------- | ------------------------------------------------------------------------------------------------------------------- |
+| **0.4.1** | 2026-03-30 | Pop-out chat windows, fixed zip import and spaces-in-path bug, fixed custom sprite loading                          |
+| **0.4.0** | 2026-03-29 | Asset packs (custom sprites, furniture, backgrounds, fonts), multi-pack support with fallthrough, user music tracks |
+| **0.3.1** | 2026-03-27 | Slack channels, triggers UI, improved MCP wiring, better channel support and caffeination handling                  |
+| **0.3.0** | 2026-03-26 | SQLite storage, iMessage channels, scheduled triggers, skills system, MCP servers, agent-to-agent collaboration     |
+| **0.2.1** | 2026-03-24 | Improved agent thinking displays, Homebrew tap                                                                      |
+| **0.2.0** | 2026-03-24 | Auto-updater                                                                                                        |
+| **0.1.8** | 2026-03-23 | Movable sprites and furniture, updated permissions flow                                                             |
+| **0.1.7** | 2026-03-22 | Initial Public Release                                                                                              |
+| **0.1.6** | 2026-03-20 | Migrated to Claude Code SDK, fixed agent config bug                                                                 |
+| **0.1.5** | 2026-03-19 | Parallel processing, background mode, timeout and cost fixes                                                        |
+| **0.1.4** | 2026-03-18 | Skills system, onboarding flow, permissions, caffeination                                                           |
+| **0.1.3** | 2026-03-18 | Git integration, MCP servers, agent collaboration bus, cost dashboard, notifications                                |
 
 ---
 
