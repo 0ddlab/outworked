@@ -19,6 +19,7 @@ class ImessageChannel extends BaseChannel {
       type: "imessage",
       label: "iMessage",
       color: "blue",
+      platforms: ["darwin"],
       description:
         "Reads incoming iMessages from the macOS Messages database and sends replies via AppleScript. macOS only. Requires Full Disk Access for the app.",
       fields: [

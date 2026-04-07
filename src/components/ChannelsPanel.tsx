@@ -138,6 +138,12 @@ const colorMap: Record<
     text: "text-pink-100",
     typeBadge: "text-pink-400",
   },
+  indigo: {
+    bg: "bg-indigo-800",
+    hover: "hover:bg-indigo-700",
+    text: "text-indigo-100",
+    typeBadge: "text-indigo-400",
+  },
 };
 const defaultColors = colorMap.slate;
 function getColors(color: string) {

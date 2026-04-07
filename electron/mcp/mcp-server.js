@@ -93,8 +93,10 @@ function downloadFile(url, dest, maxRedirects = 5) {
  */
 async function ensureCloudflared() {
   // Check if already downloaded
+  // Use F_OK on Windows — X_OK is meaningless there (executability = .exe extension)
+  const existsFlag = process.platform === "win32" ? fs.constants.F_OK : fs.constants.X_OK;
   try {
-    fs.accessSync(CLOUDFLARED_BIN, fs.constants.X_OK);
+    fs.accessSync(CLOUDFLARED_BIN, existsFlag);
     return CLOUDFLARED_BIN;
   } catch {
     // Not found — download it
@@ -102,10 +104,11 @@ async function ensureCloudflared() {
 
   // Check if system-installed
   try {
-    const systemPath = execFileSync("which", ["cloudflared"], {
+    const whichCmd = process.platform === "win32" ? "where" : "which";
+    const systemPath = execFileSync(whichCmd, ["cloudflared"], {
       encoding: "utf8",
       timeout: 3000,
-    }).trim();
+    }).trim().split(/\r?\n/)[0]; // `where` may return multiple lines; take first
     if (systemPath) return systemPath;
   } catch {
     // not on PATH
@@ -197,7 +200,7 @@ const BUILTIN_TOOLS = [
   {
     name: "send_message",
     description:
-      'Send a message through a connected messaging channel (iMessage, Slack, etc). Use list_channels first to discover available channels. For Slack threads, use "CHANNEL_ID:THREAD_TS" as the conversationId.',
+      'Send a message through a connected messaging channel (Discord, Slack, Telegram, WhatsApp, etc). Use list_channels first to discover available channels. For Slack threads or Discord threads, use "CHANNEL_ID:THREAD_ID" as the conversationId.',
     inputSchema: {
       type: "object",
       properties: {
@@ -208,7 +211,7 @@ const BUILTIN_TOOLS = [
         conversationId: {
           type: "string",
           description:
-            'Recipient — phone number/email for iMessage, Slack channel ID, or "CHANNEL_ID:THREAD_TS" for threaded replies',
+            'Recipient — Discord/Slack channel ID, or "CHANNEL_ID:THREAD_ID" for threaded replies',
         },
         content: { type: "string", description: "Message text to send" },
       },
@@ -393,15 +396,29 @@ function collectAppDocs(topic) {
       label: "Triggers",
     },
     {
-      file: "electron/channels/imessage-channel.md",
+      file: "electron/channels/discord-channel.md",
       topic: "channels",
-      label: "iMessage Channel",
+      label: "Discord Channel",
+    },
+    {
+      file: "electron/channels/telegram-channel.md",
+      topic: "channels",
+      label: "Telegram Channel",
     },
     {
       file: "electron/channels/slack-channel.md",
       topic: "channels",
       label: "Slack Channel",
     },
+    ...(process.platform === "darwin"
+      ? [
+          {
+            file: "electron/channels/imessage-channel.md",
+            topic: "channels",
+            label: "iMessage Channel",
+          },
+        ]
+      : []),
   ];
 
   // Collect SKILL.md files from skill runtimes

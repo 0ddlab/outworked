@@ -324,7 +324,7 @@ export const AGENT_TOOLS: ToolDefinition[] = [
   {
     name: "send_message",
     description:
-      'Send a message through a connected messaging channel (iMessage, Slack, etc). Use list_channels first to see which channels are available and connected. For Slack threads, use "CHANNEL_ID:THREAD_TS" as the conversationId.',
+      'Send a message through a connected messaging channel (Discord, Slack, Telegram, WhatsApp, etc). Use list_channels first to see which channels are available and connected. For Slack or Discord threads, use "CHANNEL_ID:THREAD_ID" as the conversationId.',
     parameters: {
       type: "object",
       properties: {
@@ -336,7 +336,7 @@ export const AGENT_TOOLS: ToolDefinition[] = [
         conversationId: {
           type: "string",
           description:
-            'Recipient identifier — phone number/email for iMessage, Slack channel ID, or "CHANNEL_ID:THREAD_TS" for threaded Slack replies',
+            'Recipient — Discord/Slack channel ID, or "CHANNEL_ID:THREAD_ID" for threaded replies',
         },
         content: {
           type: "string",
@@ -606,7 +606,7 @@ export async function executeTool(
       if (!db) return "Error: database not available (not running in Electron)";
       const channels = await db.channelListLive();
       if (!channels || channels.length === 0)
-        return "No messaging channels configured. Ask the user to set up a channel (iMessage or Slack) in the Channels panel.";
+        return "No messaging channels configured. Ask the user to set up a channel (Discord, Slack, Telegram, or WhatsApp) in the Channels panel.";
       return channels
         .map(
           (ch) =>

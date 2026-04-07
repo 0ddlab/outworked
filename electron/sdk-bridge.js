@@ -23,36 +23,101 @@ let _claudeExePath = null;
 function getClaudeExecutablePath() {
   if (_claudeExePath) return _claudeExePath;
 
-  const home = process.env.HOME || "";
-  // Common install locations (same paths augmentedEnv adds to PATH)
-  const candidates = [
-    path.join(home, ".claude", "bin", "claude"),
-    path.join(home, ".local", "bin", "claude"),
-    "/usr/local/bin/claude",
-  ];
+  const isWin = process.platform === "win32";
 
-  for (const p of candidates) {
+  if (isWin) {
+    // The SDK does spawn("node", [pathToClaudeCodeExecutable, ...args]) so we
+    // must return the cli.js script, NOT the .cmd wrapper.
+    const appData = process.env.APPDATA || "";
+    const userProfile = process.env.USERPROFILE || "";
+    const candidates = [
+      // npm global install → node_modules/@anthropic-ai/claude-code/cli.js
+      path.join(appData, "npm", "node_modules", "@anthropic-ai", "claude-code", "cli.js"),
+      // Claude Code native Windows installer
+      path.join(userProfile, ".claude", "local", "node_modules", "@anthropic-ai", "claude-code", "cli.js"),
+    ];
+
+    for (const p of candidates) {
+      try {
+        fs.accessSync(p, fs.constants.F_OK);
+        _claudeExePath = p;
+        return _claudeExePath;
+      } catch {
+        // not found
+      }
+    }
+
+    // Fallback: resolve from where claude.cmd points
     try {
-      fs.accessSync(p, fs.constants.X_OK);
-      _claudeExePath = p;
-      return _claudeExePath;
+      const cmdPath = execFileSync("where", ["claude.cmd"], {
+        encoding: "utf8",
+        timeout: 3000,
+      }).trim().split(/\r?\n/)[0];
+      if (cmdPath) {
+        // claude.cmd lives in %APPDATA%\npm — cli.js is in the same npm root
+        const npmDir = path.dirname(cmdPath);
+        const cliPath = path.join(npmDir, "node_modules", "@anthropic-ai", "claude-code", "cli.js");
+        if (fs.existsSync(cliPath)) {
+          _claudeExePath = cliPath;
+          return _claudeExePath;
+        }
+      }
     } catch {
-      // not found / not executable
+      // not on PATH
+    }
+  } else {
+    // Unix: check common install locations
+    const home = process.env.HOME || "";
+    const candidates = [
+      path.join(home, ".claude", "bin", "claude"),
+      path.join(home, ".local", "bin", "claude"),
+      "/usr/local/bin/claude",
+    ];
+
+    for (const p of candidates) {
+      try {
+        fs.accessSync(p, fs.constants.X_OK);
+        _claudeExePath = p;
+        return _claudeExePath;
+      } catch {
+        // not found / not executable
+      }
+    }
+
+    try {
+      _claudeExePath = execFileSync("which", ["claude"], {
+        encoding: "utf8",
+        timeout: 3000,
+      }).trim();
+      if (_claudeExePath) return _claudeExePath;
+    } catch {
+      // not on PATH
     }
   }
 
-  // Fallback: ask the shell (works if claude is on the user's login PATH)
+  return undefined; // let the SDK try its default (will fail inside asar)
+}
+
+// Find Git Bash on Windows by locating bash.exe relative to the git install.
+function findGitBashPath() {
   try {
-    _claudeExePath = execFileSync("which", ["claude"], {
+    const gitExe = execFileSync("where", ["git"], {
       encoding: "utf8",
       timeout: 3000,
-    }).trim();
-    if (_claudeExePath) return _claudeExePath;
+    }).trim().split(/\r?\n/)[0];
+    if (!gitExe) return null;
+    // git.exe is typically at <git-root>\cmd\git.exe or <git-root>\mingw64\bin\git.exe
+    // bash.exe lives at <git-root>\bin\bash.exe
+    const gitRoot = path.resolve(path.dirname(gitExe), "..");
+    const candidate = path.join(gitRoot, "bin", "bash.exe");
+    if (fs.existsSync(candidate)) return candidate;
+    // Some installs have it one level deeper
+    const candidate2 = path.resolve(path.dirname(gitExe), "..", "..", "bin", "bash.exe");
+    if (fs.existsSync(candidate2)) return candidate2;
   } catch {
-    // not on PATH
+    // git not on PATH
   }
-
-  return undefined; // let the SDK try its default (will fail inside asar)
+  return null;
 }
 
 // Active sessions: reqId → { abortController, done: boolean, heartbeatInterval }
@@ -112,13 +177,28 @@ async function startSession(reqId, options, callbacks) {
   }
 
   // Build SDK options from ClaudeCodeAdvancedOptions
+  // On Windows, Electron's HOME is unset or a bash-style path — use USERPROFILE.
+  const cwd = options.cwd ||
+    (process.platform === "win32"
+      ? process.env.USERPROFILE
+      : process.env.HOME);
+
   const sdkOptions = {
-    cwd: options.cwd || process.env.HOME,
+    cwd,
     abortController,
     // Load all filesystem settings (user, project, local) so CLAUDE.md,
     // permissions, and MCP servers configured in settings.json are available.
     settingSources: ["user", "project", "local"],
   };
+
+  // On Windows, Claude Code needs Git Bash. Find bash.exe relative to git.
+  if (process.platform === "win32") {
+    const gitBashPath = findGitBashPath();
+    sdkOptions.env = {
+      ...process.env,
+      ...(gitBashPath ? { CLAUDE_CODE_GIT_BASH_PATH: gitBashPath } : {}),
+    };
+  }
 
   // Point the SDK at the system-installed Claude CLI so it doesn't try
   // to spawn cli.js from inside the app.asar archive.

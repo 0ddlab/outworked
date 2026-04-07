@@ -21,9 +21,15 @@ for (const file of files) {
 
   try {
     const ChannelClass = require(path.join(dir, file));
-    if (ChannelClass?.metadata?.type) {
-      channelClasses.set(ChannelClass.metadata.type, ChannelClass);
+    if (!ChannelClass?.metadata?.type) continue;
+
+    // Skip channels that declare platform restrictions
+    const platforms = ChannelClass.metadata.platforms;
+    if (Array.isArray(platforms) && !platforms.includes(process.platform)) {
+      continue;
     }
+
+    channelClasses.set(ChannelClass.metadata.type, ChannelClass);
   } catch (err) {
     console.error(`[Channels] Failed to load ${file}: ${err.message}`);
   }

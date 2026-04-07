@@ -342,15 +342,23 @@ export default function OnboardingModal({
                   </div>
                   <p className="text-[11px] text-slate-400 mb-3">
                     Channels connect your agents to external messaging platforms
-                    like iMessage and Slack. When a message arrives, it gets
-                    routed to an agent who can read and reply automatically.
+                    like Discord, Telegram, and Slack. When a message arrives,
+                    it gets routed to an agent who can read and reply
+                    automatically.
                   </p>
                   <div className="space-y-1.5 text-[11px] text-slate-400">
                     <div className="flex items-start gap-2">
                       <span className="text-indigo-400 mt-0.5 shrink-0">▸</span>
                       <span>
-                        <span className="text-slate-200">iMessage</span> —
-                        read & reply to texts on macOS
+                        <span className="text-slate-200">Discord</span> —
+                        bot that reads &amp; replies in servers or DMs
+                      </span>
+                    </div>
+                    <div className="flex items-start gap-2">
+                      <span className="text-indigo-400 mt-0.5 shrink-0">▸</span>
+                      <span>
+                        <span className="text-slate-200">Telegram</span> —
+                        bot that chats via long-polling
                       </span>
                     </div>
                     <div className="flex items-start gap-2">

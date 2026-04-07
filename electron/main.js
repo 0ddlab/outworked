@@ -2190,6 +2190,7 @@ function setupMusicIPC() {
     const raw = request.url.replace(/^user-music:\/\//, "");
     const relParts = raw.split("/").filter(Boolean).map(decodeURIComponent);
     const filePath = path.join(getUserMusicDir(), ...relParts);
+    if (!fs.existsSync(filePath)) return new Response(null, { status: 404 });
     return net.fetch(require("url").pathToFileURL(filePath).href);
   });
 
@@ -2291,6 +2292,7 @@ function setupAssetsIPC() {
     const raw = request.url.replace(/^user-assets:\/\//, "");
     const relParts = raw.split("/").filter(Boolean).map(decodeURIComponent);
     const filePath = path.join(getAssetsDir(), ...relParts);
+    if (!fs.existsSync(filePath)) return new Response(null, { status: 404 });
     return net.fetch(require("url").pathToFileURL(filePath).href);
   });
 

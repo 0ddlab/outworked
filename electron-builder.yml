@@ -28,11 +28,17 @@ mac:
     - zip
 afterSign: null
 win:
+  icon: build/icon.ico
+  publishAutoUpdate: true
   target:
-    - nsis
+    - target: nsis
+      arch:
+        - x64
 linux:
   target:
     - AppImage
 nsis:
-  oneClick: true
+  oneClick: false
   perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
