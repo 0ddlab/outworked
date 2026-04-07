@@ -8,12 +8,16 @@
   <a href="https://github.com/outworked/outworked/releases/download/v0.4.3/Outworked-0.4.3-arm64.dmg">
     <img src="https://img.shields.io/badge/Download_for_macOS-v0.4.3-brightgreen?style=for-the-badge&logo=apple" alt="Download for macOS" />
   </a>
+  &nbsp;
+  <a href="https://github.com/outworked/outworked/releases">
+    <img src="https://img.shields.io/badge/Download_for_Windows-v0.4.3-blue?style=for-the-badge&logo=windows" alt="Download for Windows" />
+  </a>
 </p>
 
 <p align="center">
   <strong>Outworked is a desktop app that turns Claude into a team of AI employees.<br/>
   Hire agents. Give them roles. Watch them write code, interact with the web, send messages,<br/>
-  and run scheduled tasks — all from an office on your Mac.</strong>
+  and run scheduled tasks — all from an office on your desktop.</strong>
 </p>
 <p align="center">
   <em>Fully customizable — import your own sprites, furniture, backgrounds, and fonts via asset packs.<br/>
@@ -24,7 +28,7 @@
   <a href="https://github.com/outworked/outworked/stargazers"><img src="https://img.shields.io/github/stars/outworked/outworked?style=social" alt="GitHub Stars" /></a>
   <a href="https://github.com/outworked/outworked/releases"><img src="https://img.shields.io/badge/version-0.4.3-green.svg" alt="Version" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-GPL%203.0-blue.svg" alt="License: GPL-3.0" /></a>
-  <img src="https://img.shields.io/badge/platform-macOS-lightgrey.svg" alt="Platform" />
+  <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey.svg" alt="Platform" />
 </p>
 
 ---
@@ -85,7 +89,7 @@ These are real things you can do today:
 2. **Frontend Dev** scaffolds the site, writes the HTML/CSS/JS, and starts a local server
 3. **Designer** reviews the page in the built-in browser, takes a screenshot, and asks Frontend Dev to tweak the spacing
 4. Frontend Dev makes the fix, then runs `tunnel_start` to get a public URL
-5. Frontend Dev calls `send_message` to text the link to your cofounder on iMessage
+5. Frontend Dev calls `send_message` to share the link with your cofounder on Discord
 
 You watched the whole thing happen at the office. You are wowed. Your cofounder gives you more equity. Total prompts from you: **1**.
 
@@ -93,7 +97,7 @@ You watched the whole thing happen at the office. You are wowed. Your cofounder 
 
 1. You tell your **Ops Agent** to set up a daily task
 2. The agent creates a scheduled trigger with a cron expression (`0 9 * * *`)
-3. Every morning, the agent wakes up, queries the GitHub MCP server for open PRs, writes a summary, and sends it to you via iMessage
+3. Every morning, the agent wakes up, queries the GitHub MCP server for open PRs, writes a summary, and sends it to you via Discord or Telegram
 4. You read it on your phone over coffee
 
 No scripts to maintain. No GitHub Actions to debug. Just an agent with a schedule.
@@ -122,7 +126,7 @@ Three agents working simultaneously, finishing in minutes what would take you ho
 
 **Browse the web** — Research docs, scrape pages, fill out forms, take screenshots, and bring findings back to the team via the built-in browser.
 
-**Send and receive messages** — Reply to customers on Slack, text you a summary on iMessage, or monitor a channel and trigger tasks when someone says the magic word.
+**Send and receive messages** — Reply to customers on Slack, message you a summary on Discord or Telegram, or monitor a channel and trigger tasks when someone says the magic word.
 
 **Run on a schedule** — Daily standups, weekly reports, hourly health checks, one-off reminders. Set a cron and let an agent handle it while you sleep.
 
@@ -142,7 +146,7 @@ Three agents working simultaneously, finishing in minutes what would take you ho
 - **Multi-Agent Collaboration** — Agents talk to each other via `[ASK:AgentName]` and a shared message bus
 - **Full Claude Code Power** — Every agent gets full tool access (Bash, Edit, Read, etc.) with persistent sessions
 - **MCP Server Support** — Connect agents to external tools and services via the Model Context Protocol
-- **Messaging Channels** — Connect iMessage and Slack so agents can send and receive messages in real conversations
+- **Messaging Channels** — Connect Discord, Telegram, Slack, or iMessage (macOS) so agents can send and receive messages in real conversations
 - **Built-in Browser** — Full Chromium browser for agents to navigate, click, fill forms, and take screenshots
 - **Built-in Tunneling** — Expose local servers to the internet via Cloudflare tunnels with a single tool call
 - **Triggers & Scheduling** — Fire off agent tasks on a schedule (cron, interval, one-time) or in response to incoming messages
@@ -175,16 +179,20 @@ Each agent can run a different model — pair a fast model for simple tasks with
 
 ### 1. Install
 
-**Homebrew (recommended)**
+**macOS — Homebrew (recommended)**
 
 ```bash
 brew tap outworked/tap
 brew install --cask outworked
 ```
 
-**Manual download**
+**macOS — Manual download**
 
 Grab the latest `.dmg` from the [releases page](https://github.com/outworked/outworked/releases) and drag to Applications.
+
+**Windows**
+
+Download the latest `.exe` installer from the [releases page](https://github.com/outworked/outworked/releases) and run it. See [WINDOWS.md](WINDOWS.md) for full setup details.
 
 ### 2. Prerequisites
 
@@ -243,7 +251,7 @@ electron/
 ├── preload.js        # Context bridge to renderer
 ├── sdk-bridge.js     # Claude Code SDK bridge
 ├── db/               # SQLite database and migrations
-├── channels/         # Messaging channels (iMessage, Slack)
+├── channels/         # Messaging channels (Discord, Telegram, Slack, iMessage)
 ├── mcp/              # MCP server management
 ├── skills/           # Skill runtimes (browser, Gmail, Slack, Notion, etc.)
 └── triggers/         # Trigger engine, webhooks, and scheduling
@@ -314,8 +322,10 @@ You can also add **custom MCP servers** (stdio or HTTP) and configure environmen
 
 Channels connect agents to messaging platforms. Supported channel types:
 
-- **iMessage** — Send and receive messages via phone number or email
+- **Discord** — Monitor servers and DMs, reply in channels and threads
+- **Telegram** — Chat with a bot via long-polling, quote-reply support
 - **Slack** — Send and receive messages in Slack channels and threads
+- **iMessage** — Send and receive messages via phone number or email (macOS only)
 
 Agents interact with channels through built-in tools: `send_message`, `list_channels`, and `read_channel_messages`. Configure allowed senders to control who can reach your agents.
 
@@ -329,7 +339,7 @@ Triggers wire up events to agents — when something happens, a prompt is automa
 
 | Type                | Fires when…                                                         |
 | ------------------- | ------------------------------------------------------------------- |
-| **Message Pattern** | An inbound channel message (Slack, iMessage) matches a pattern      |
+| **Message Pattern** | An inbound channel message (Discord, Slack, Telegram) matches a pattern |
 | **Webhook**         | An external system sends an HTTP POST to a trigger URL              |
 | **Skill Event**     | An internal skill emits a named event (e.g. `scheduler:task_fired`) |
 
@@ -391,7 +401,7 @@ When a site requires login, the agent calls `browse:login` and a browser window 
 
 Are you proud of what an agent built? Outworked has built-in Cloudflare tunneling — agents can expose any local server to the internet with a single tool call.
 
-An agent starts a dev server, runs `tunnel_start`, and gets back a public URL. It can then send that link to someone via iMessage or Slack. No ngrok setup, no config — cloudflared is downloaded automatically on first use.
+An agent starts a dev server, runs `tunnel_start`, and gets back a public URL. It can then send that link to someone via Discord, Slack, or Telegram. No ngrok setup, no config — cloudflared is downloaded automatically on first use.
 
 **Tools:** `tunnel_start`, `tunnel_stop`, `tunnel_list`
 
@@ -399,7 +409,7 @@ An agent starts a dev server, runs `tunnel_start`, and gets back a public URL. I
 
 1. Agent builds a landing page and starts `npx serve dist` on port 3000
 2. Agent calls `tunnel_start` with port 3000 — gets a public `*.trycloudflare.com` URL
-3. Agent sends the link via iMessage to your teammate for review
+3. Agent sends the link via Discord to your teammate for review
 4. Teammate is wowed by the landing page
 
 ---
@@ -570,7 +580,7 @@ Outworked is built on the Claude Code SDK, so it uses whichever models Claude Co
 <details>
 <summary><strong>Can agents access the internet?</strong></summary>
 
-Yes. Agents have a built-in browser that can navigate pages, fill forms, take screenshots, and interact with any website. They can also expose local servers to the internet via built-in Cloudflare tunneling, and send links or results through iMessage and Slack.
+Yes. Agents have a built-in browser that can navigate pages, fill forms, take screenshots, and interact with any website. They can also expose local servers to the internet via built-in Cloudflare tunneling, and send links or results through Discord, Telegram, or Slack.
 
 </details>
 
@@ -584,7 +594,9 @@ Absolutely. Agents can browse the web for research, send and receive messages, m
 <details>
 <summary><strong>Does it work on Windows and Linux?</strong></summary>
 
-macOS is the primary platform today. Windows and Linux builds are possible via Electron but haven't been fully tested yet. iMessage channels are macOS-only. We will be testing Windows and Linux soon.
+**Windows** is fully supported — agents, channels (Discord, Telegram, Slack), tunneling, and the built-in browser all work. iMessage is macOS-only and is automatically hidden on Windows. See [WINDOWS.md](WINDOWS.md) for setup instructions.
+
+**Linux** builds are possible via Electron (AppImage) but haven't been fully tested yet.
 
 </details>
 
